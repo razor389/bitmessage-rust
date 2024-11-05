@@ -115,13 +115,15 @@ mod tests {
 
     #[test]
     fn test_client_node_communication() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         use std::sync::Arc;
         use bitmessage_rust::client::Client;
         use bitmessage_rust::node::Node;
         use bitmessage_rust::authentication::Authentication;
         use bitmessage_rust::encryption::Encryption;
+        use env_logger;
+
+        // Initialize the logger
+        let _ = env_logger::builder().is_test(true).try_init();
 
         // Initialize clients' authentication and encryption
         let auth_a = Authentication::new();
@@ -130,20 +132,22 @@ mod tests {
         let auth_b = Authentication::new();
         let enc_b = Encryption::new();
 
-        // Create dummy nodes to initialize clients and compute addresses
-        let dummy_node = Arc::new(Node::new(vec![]));
+        // Create dummy nodes to compute clients' addresses
+        let dummy_node = Arc::new(Node::new(0, vec![], 1));
 
-        // Create clients
+        // Create clients connected to the dummy node
         let client_a = Client::new(auth_a, enc_a, Arc::clone(&dummy_node));
         let client_b = Client::new(auth_b, enc_b, Arc::clone(&dummy_node));
 
-        // Create nodes responsible for clients' address prefixes
-        let node_prefix_length = 1; // Adjust for testing
-        let node_a_prefix = client_a.address[..node_prefix_length].to_vec();
-        let node_b_prefix = client_b.address[..node_prefix_length].to_vec();
+        // Compute node prefixes based on clients' addresses
+        let prefix_length = 1; // Adjust as needed for testing
+        let node_a_prefix = client_a.address[..prefix_length].to_vec();
+        let node_b_prefix = client_b.address[..prefix_length].to_vec();
 
-        let node_a = Arc::new(Node::new(node_a_prefix));
-        let node_b = Arc::new(Node::new(node_b_prefix));
+        // Create nodes with unique IDs and PoW difficulty, using prefixes derived from clients' addresses
+        let pow_difficulty = 1; // Adjust for testing purposes
+        let node_a = Arc::new(Node::new(1, node_a_prefix.clone(), pow_difficulty));
+        let node_b = Arc::new(Node::new(2, node_b_prefix.clone(), pow_difficulty));
 
         // Connect nodes to each other
         node_a.connect(Arc::clone(&node_b));
@@ -163,7 +167,6 @@ mod tests {
 
         // Client A sends a message to Client B
         let message = b"Hello, Client B!";
-        let pow_difficulty = 1; // Adjust for testing purposes
 
         client_a.send_message(
             &client_b.auth.verifying_key(), // Recipient's verifying key
@@ -179,5 +182,6 @@ mod tests {
         assert_eq!(received_messages.len(), 1);
         assert_eq!(received_messages[0].as_slice(), message);
     }
+
 
 }

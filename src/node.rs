@@ -1,23 +1,29 @@
 // src/node.rs
 
 use crate::packet::Packet;
-use std::sync::{Arc, Mutex};
+use std::{collections::HashSet, sync::{Arc, Mutex}};
 #[allow(unused_imports)]
 use log::{info, debug, warn, error};
 
 pub struct Node {
+    pub id: usize, // Unique identifier for the node
     pub prefix: Vec<u8>, // The address prefix this node is responsible for
     pub messages: Arc<Mutex<Vec<Packet>>>, // Store all messages in a single vector
     pub connected_nodes: Arc<Mutex<Vec<Arc<Node>>>>, // Wrap in Arc<Mutex<...>> to allow mutation
+    pub pow_difficulty: usize, // PoW difficulty level
+    pub blacklist: Arc<Mutex<HashSet<usize>>>, // Blacklisted node IDs
 }
 
 impl Node {
-    pub fn new(prefix: Vec<u8>) -> Self {
-        info!("Node created with prefix {:?}", prefix);
+    pub fn new(id: usize, prefix: Vec<u8>, pow_difficulty: usize) -> Self {
+        info!("Node {} created with prefix {:?}", id, prefix);
         Node {
+            id,
             prefix,
             messages: Arc::new(Mutex::new(Vec::new())),
             connected_nodes: Arc::new(Mutex::new(Vec::new())),
+            pow_difficulty,
+            blacklist: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -25,31 +31,62 @@ impl Node {
     pub fn connect(&self, node: Arc<Node>) {
         let mut connected_nodes = self.connected_nodes.lock().unwrap();
         info!(
-            "Node with prefix {:?} connected to node with prefix {:?}",
-            self.prefix, node.prefix
+            "Node {} connected to node {} with prefix {:?}",
+            self.id, node.id, node.prefix
         );
         connected_nodes.push(node);
     }
 
     // Receive a packet and process it
-    pub fn receive_packet(self: Arc<Self>, packet: Packet) {
+    pub fn receive_packet(self: Arc<Self>, packet: Packet, sender_id: Option<usize>) {
         info!(
-            "Node with prefix {:?} received packet destined for address {:?}",
-            self.prefix, packet.recipient_address
+            "Node {} received packet destined for address {:?}",
+            self.id, packet.recipient_address
         );
-        let packet_address = packet.recipient_address; // Use recipient_address
 
-        // Check if the packet's recipient address matches the node's prefix
+        // If the sender is blacklisted, ignore the packet
+        if let Some(s_id) = sender_id {
+            let blacklist = self.blacklist.lock().unwrap();
+            if blacklist.contains(&s_id) {
+                warn!(
+                    "Node {} ignoring packet from blacklisted node {}",
+                    self.id, s_id
+                );
+                return;
+            }
+        }
+
+        // Verify PoW
+        if !packet.verify_pow(self.pow_difficulty) {
+            warn!(
+                "Node {} received packet with invalid PoW from node {:?}",
+                self.id, sender_id
+            );
+
+            // Blacklist the sender if known
+            if let Some(s_id) = sender_id {
+                let mut blacklist = self.blacklist.lock().unwrap();
+                blacklist.insert(s_id);
+                warn!("Node {} blacklisted node {}", self.id, s_id);
+            }
+
+            // Do not process the packet further
+            return;
+        }
+
+        let packet_address = packet.recipient_address;
+
+        // Store the packet if the recipient address matches the node's prefix
         if packet_address.starts_with(&self.prefix) {
             // Store the packet
             let mut messages = self.messages.lock().unwrap();
             messages.push(packet.clone());
             info!(
-                "Packet stored at node with prefix {:?}. Total messages stored: {}",
-                self.prefix,
+                "Node {} stored packet. Total messages stored: {}",
+                self.id,
                 messages.len()
             );
-        } 
+        }
 
         // Forward the packet to connected nodes whose prefixes match the recipient address
         let connected_nodes = self.connected_nodes.lock().unwrap();
@@ -58,17 +95,27 @@ impl Node {
             if Arc::ptr_eq(node, &self) {
                 continue;
             }
-            // Avoid forwarding to nodes that already received the packet
+
+            // Check if the node is blacklisted
+            let blacklist = self.blacklist.lock().unwrap();
+            if blacklist.contains(&node.id) {
+                warn!(
+                    "Node {} not forwarding to blacklisted node {}",
+                    self.id, node.id
+                );
+                continue;
+            }
+
             if packet_address.starts_with(&node.prefix) {
                 info!(
-                    "Node with prefix {:?} forwarding packet to node with prefix {:?}",
-                    self.prefix, node.prefix
+                    "Node {} forwarding packet to node {} with prefix {:?}",
+                    self.id, node.id, node.prefix
                 );
-                node.clone().receive_packet(packet.clone());
+                node.clone().receive_packet(packet.clone(), Some(self.id));
             } else {
                 debug!(
-                    "Node with prefix {:?} not forwarding to node with prefix {:?} as prefix does not match",
-                    self.prefix, node.prefix
+                    "Node {} not forwarding to node {} as prefix does not match",
+                    self.id, node.id
                 );
             }
         }
@@ -78,7 +125,8 @@ impl Node {
     pub fn get_all_messages(&self) -> Vec<Packet> {
         let messages = self.messages.lock().unwrap();
         info!(
-            "Node with prefix {:?} providing {} messages",
+            "Node {} with prefix {:?} providing {} messages",
+            self.id,
             self.prefix,
             messages.len()
         );

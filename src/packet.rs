@@ -168,4 +168,29 @@ impl Packet {
             None
         }
     }
+
+    pub fn verify_pow(&self, pow_difficulty: usize) -> bool {
+        // Reconstruct the packet data without PoW fields
+        let packet_without_pow = Packet {
+            signing_public_key: self.signing_public_key,
+            dh_public_key: self.dh_public_key,
+            nonce: self.nonce,
+            ciphertext: self.ciphertext.clone(),
+            signature: self.signature.clone(),
+            pow_nonce: 0,
+            pow_hash: Vec::new(),
+            recipient_address: self.recipient_address,
+        };
+
+        let packet_data = packet_without_pow.serialize();
+
+        let pow = PoW::new(
+            &packet_data,
+            pow_difficulty,
+            PoWAlgorithm::Argon2id(Argon2Params::default()),
+        )
+        .unwrap();
+
+        pow.verify_pow(&self.pow_hash, self.pow_nonce)
+    }
 }

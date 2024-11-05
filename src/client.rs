@@ -78,7 +78,7 @@ impl Client {
         // Send the packet to the connected node
         self.connected_node
             .clone()
-            .receive_packet(packet);
+            .receive_packet(packet, Some(self.connected_node.id));
     }
 
     // Retrieve all messages from the node and filter messages addressed to this client
