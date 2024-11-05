@@ -30,6 +30,7 @@ This implementation includes several planned features to enhance the functionali
 - **Acknowledgment of Messages**: Implementing acknowledgments to ensure message delivery.
 - **Node Communication**: Facilitating reliable communication between nodes, maintaining node lists/hashmaps to rout messages efficiently.
 - **Node Blacklisting**: Adding the ability to blacklist malicious or non-cooperative nodes.
+- **Node Data Storage**: efficient hash map database structure (like redis?) with ttl
 
 ### Scalability and Filtering
 
