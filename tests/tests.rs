@@ -140,7 +140,7 @@ mod tests {
         let client_b = Client::new(auth_b, enc_b, Arc::clone(&dummy_node));
 
         // Compute node prefixes based on clients' addresses
-        let prefix_length = 1; // Adjust as needed for testing
+        let prefix_length = 5; // Adjust as needed for testing
         let node_a_prefix = client_a.address[..prefix_length].to_vec();
         let node_b_prefix = client_b.address[..prefix_length].to_vec();
 

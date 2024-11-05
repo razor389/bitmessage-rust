@@ -27,8 +27,8 @@ This implementation includes several planned features to enhance the functionali
 - **Message TTL**: Setting a time-to-live (TTL) for messages to expire outdated information.
 - **Acknowledgment of Messages**: Implementing acknowledgments to ensure message delivery.
 - **Node Communication**: Facilitating reliable communication between nodes, maintaining node lists/hashmaps to rout messages efficiently.
-- **Node Blacklisting**: Adding the ability to blacklist malicious or non-cooperative nodes.
 - **Node Data Storage**: efficient hash map database structure (like redis?) with ttl
+_ **POW params**: we want clients to be able to adjust the memory/core allocation to argon2id. should be ablet to set params.
 
 ### Scalability and Filtering
 
