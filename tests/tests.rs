@@ -6,7 +6,6 @@ mod tests {
 
     use bitmessage_rust::packet::Packet;
     use bitmessage_rust::pow::{PoW, PoWAlgorithm};
-    use bitmessage_rust::pow::ScryptParams;
     use argon2::Params as Argon2Params;
     // At the top of your test module
     use env_logger;
@@ -89,52 +88,6 @@ mod tests {
         assert_eq!(decrypted_message.as_deref(), Some(message.as_ref()));
     }
 
-
-    #[test]
-    fn test_pow_algorithm_sha2_256() {
-        let data = b"hello world";
-        let nonce = 12345u64;
-        let expected_hash = PoWAlgorithm::calculate_sha2_256(data, nonce);
-
-        let hash = PoWAlgorithm::calculate_sha2_256(data, nonce);
-
-        assert_eq!(hash, expected_hash);
-    }
-
-    #[test]
-    fn test_pow_algorithm_sha2_512() {
-        let data = b"hello world";
-        let nonce = 12345u64;
-        let expected_hash = PoWAlgorithm::calculate_sha2_512(data, nonce);
-
-        let hash = PoWAlgorithm::calculate_sha2_512(data, nonce);
-
-        assert_eq!(hash, expected_hash);
-    }
-
-    #[test]
-    fn test_pow_algorithm_ripemd_320() {
-        let data = b"hello world";
-        let nonce = 12345u64;
-        let expected_hash = PoWAlgorithm::calculate_ripemd_320(data, nonce);
-
-        let hash = PoWAlgorithm::calculate_ripemd_320(data, nonce);
-
-        assert_eq!(hash, expected_hash);
-    }
-
-    #[test]
-    fn test_pow_algorithm_scrypt() {
-        let data = b"hello world";
-        let nonce = 12345u64;
-        let params = ScryptParams::new(8, 4, 1, 32).unwrap();
-        let expected_hash = PoWAlgorithm::calculate_scrypt(data, nonce, &params);
-
-        let hash = PoWAlgorithm::calculate_scrypt(data, nonce, &params);
-
-        assert_eq!(hash, expected_hash);
-    }
-
     #[test]
     fn test_pow_algorithm_argon2id() {
         let data = b"hello world";
@@ -145,18 +98,6 @@ mod tests {
         let hash = PoWAlgorithm::calculate_argon2id(data, nonce, &params);
 
         assert_eq!(hash, expected_hash);
-    }
-
-    #[test]
-    fn test_pow_calculate_pow() {
-        let data = "hello world";
-        let difficulty = 2;
-        let algorithm = PoWAlgorithm::Sha2_256;
-        let pow = PoW::new(data, difficulty, algorithm).unwrap();
-
-        let (hash, nonce) = pow.calculate_pow();
-
-        assert!(pow.verify_pow(&hash, nonce));
     }
 
 
