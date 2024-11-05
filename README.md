@@ -18,6 +18,9 @@ This implementation includes several planned features to enhance the functionali
 
 ### Planned Features (TODO)
 
+
+- **Client Anonymity**: Clients should look like nodes to the nodes they are communicating with (so they aren't obviously the origin of the messages they send)
+- **POW Check in Node**: Received messages should have POW verified. No network traffic should propagate without POW. Any node forwarding non POW traffic must be blacklisted.
 - **Message Compression**: Reducing the message size for efficient storage and transmission.
 - **Address Broadcasting**: Enabling nodes to broadcast their address and keys to other nodes.
 - **Key Retrieval**: Allowing nodes to request public keys from specific addresses.
@@ -25,7 +28,7 @@ This implementation includes several planned features to enhance the functionali
 - **Message Timestamping**: Adding timestamps to messages for tracking and validation.
 - **Message TTL**: Setting a time-to-live (TTL) for messages to expire outdated information.
 - **Acknowledgment of Messages**: Implementing acknowledgments to ensure message delivery.
-- **Node Communication**: Facilitating reliable communication between nodes.
+- **Node Communication**: Facilitating reliable communication between nodes, maintaining node lists/hashmaps to rout messages efficiently.
 - **Node Blacklisting**: Adding the ability to blacklist malicious or non-cooperative nodes.
 
 ### Scalability and Filtering
