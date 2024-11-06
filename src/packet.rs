@@ -1,11 +1,10 @@
 // src/packet.rs
 
-use argon2::Params as Argon2Params;
 use serde::{Serialize, Deserialize};
 use ed25519_dalek::{Signature, VerifyingKey};
 use x25519_dalek::PublicKey as X25519PublicKey;
 
-use crate::{authentication::Authentication, encryption::Encryption, pow::{PoW, PoWAlgorithm}};
+use crate::{authentication::Authentication, encryption::Encryption, pow::{PoW, PoWAlgorithm}, serializable_argon2_params::SerializableArgon2Params};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[allow(unused_imports)]
@@ -23,9 +22,10 @@ pub struct Packet {
     pub signature: Vec<u8>, 
     pub pow_nonce: u64,
     pub pow_hash: Vec<u8>,
-    pub recipient_address: Address, // Added recipient_address
+    pub recipient_address: Address,
     pub timestamp: u64, // UNIX timestamp in seconds
     pub ttl: u64,       // Time to live in seconds
+    pub argon2_params: SerializableArgon2Params,
 }
 
 impl Packet {
@@ -40,6 +40,7 @@ impl Packet {
         recipient_address: Address, // Added recipient_address
         timestamp: u64,
         ttl: u64,
+        argon2_params: SerializableArgon2Params,
     ) -> Self {
         Packet {
             signing_public_key,
@@ -52,6 +53,7 @@ impl Packet {
             recipient_address, // Added recipient_address
             timestamp,
             ttl,
+            argon2_params,
         }
     }
 
@@ -77,10 +79,11 @@ impl Packet {
         auth: &Authentication,
         encryption: &Encryption,
         recipient_public_key: &X25519PublicKey,
-        recipient_address: Address, // Added recipient_address
+        recipient_address: Address,
         message: &[u8],
         pow_difficulty: usize,
-        ttl: u64, // Added ttl
+        ttl: u64,
+        argon2_params: SerializableArgon2Params,
     ) -> Self {
         info!("Creating signed and encrypted packet");
         // Step 1: Sign the message
@@ -100,18 +103,21 @@ impl Packet {
             signature,
             pow_nonce: 0,
             pow_hash: Vec::new(),
-            recipient_address, // Include recipient_address
+            recipient_address,
             timestamp,
             ttl,
+            argon2_params: argon2_params.clone(),
         };
 
         let packet_data = packet.serialize();
 
         // Step 4: Perform PoW
+        let argon2_params_native = argon2_params.to_argon2_params();
+
         let pow = PoW::new(
             &packet_data,
             pow_difficulty,
-            PoWAlgorithm::Argon2id(Argon2Params::default()),
+            PoWAlgorithm::Argon2id(argon2_params_native),
         )
         .unwrap();
 
@@ -136,24 +142,19 @@ impl Packet {
         );
         // Step 1: Verify PoW
         let packet_without_pow = Packet {
-            signing_public_key: self.signing_public_key,
-            dh_public_key: self.dh_public_key,
-            nonce: self.nonce,
-            ciphertext: self.ciphertext.clone(),
-            signature: self.signature.clone(),
             pow_nonce: 0,
             pow_hash: Vec::new(),
-            recipient_address: self.recipient_address,
-            timestamp: self.timestamp,
-            ttl: self.ttl,
+            ..self.clone()
         };
 
         let packet_data = packet_without_pow.serialize();
 
+        let argon2_params_native = self.argon2_params.to_argon2_params();
+
         let pow = PoW::new(
             &packet_data,
             pow_difficulty,
-            PoWAlgorithm::Argon2id(Argon2Params::default()),
+            PoWAlgorithm::Argon2id(argon2_params_native),
         )
         .unwrap();
 
@@ -168,7 +169,6 @@ impl Packet {
         // Step 3: Verify the signature
         let verifying_key = VerifyingKey::from_bytes(&self.signing_public_key).ok()?;
 
-        // Convert the signature Vec<u8> to &[u8; 64] if it has the correct length
         let signature_bytes: &[u8; 64] = self.signature.as_slice().try_into().ok()?;
         let signature = Signature::from_bytes(signature_bytes);
 
@@ -186,24 +186,19 @@ impl Packet {
     pub fn verify_pow(&self, pow_difficulty: usize) -> bool {
         // Reconstruct the packet data without PoW fields
         let packet_without_pow = Packet {
-            signing_public_key: self.signing_public_key,
-            dh_public_key: self.dh_public_key,
-            nonce: self.nonce,
-            ciphertext: self.ciphertext.clone(),
-            signature: self.signature.clone(),
             pow_nonce: 0,
             pow_hash: Vec::new(),
-            recipient_address: self.recipient_address,
-            timestamp: self.timestamp,
-            ttl: self.ttl,
+            ..self.clone()
         };
 
         let packet_data = packet_without_pow.serialize();
 
+        let argon2_params_native = self.argon2_params.to_argon2_params();
+
         let pow = PoW::new(
             &packet_data,
             pow_difficulty,
-            PoWAlgorithm::Argon2id(Argon2Params::default()),
+            PoWAlgorithm::Argon2id(argon2_params_native),
         )
         .unwrap();
 

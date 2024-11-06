@@ -1,6 +1,6 @@
 // src/node.rs
 
-use crate::packet::Packet;
+use crate::{packet::Packet, serializable_argon2_params::SerializableArgon2Params};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -17,10 +17,11 @@ pub struct Node {
     pub pow_difficulty: usize, // PoW difficulty level
     pub max_ttl: u64,          // Max TTL in seconds
     pub blacklist: Arc<Mutex<HashSet<usize>>>, // Blacklisted node IDs
+    pub min_argon2_params: SerializableArgon2Params, // Use serializable version
 }
 
 impl Node {
-    pub fn new(id: usize, prefix: Vec<u8>, pow_difficulty: usize, max_ttl: u64) -> Self {
+    pub fn new(id: usize, prefix: Vec<u8>, pow_difficulty: usize, max_ttl: u64, min_argon2_params: SerializableArgon2Params,) -> Self {
         info!("Node {} created with prefix {:?}", id, prefix);
         Node {
             id,
@@ -30,7 +31,15 @@ impl Node {
             pow_difficulty,
             max_ttl,
             blacklist: Arc::new(Mutex::new(HashSet::new())),
+            min_argon2_params,
         }
+    }
+
+    // Check if Argon2id parameters are acceptable
+    fn is_acceptable_argon2_params(&self, params: &SerializableArgon2Params) -> bool {
+        params.m_cost >= self.min_argon2_params.m_cost
+            && params.t_cost >= self.min_argon2_params.t_cost
+            && params.p_cost >= self.min_argon2_params.p_cost
     }
 
     // Connect to another node
@@ -60,6 +69,15 @@ impl Node {
                 );
                 return;
             }
+        }
+
+        // Verify Argon2id parameters
+        if !self.is_acceptable_argon2_params(&packet.argon2_params) {
+            warn!(
+                "Node {} received packet with unacceptable Argon2id parameters from node {:?}",
+                self.id, sender_id
+            );
+            return; // Discard the packet
         }
 
         // Verify PoW

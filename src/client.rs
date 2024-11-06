@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use x25519_dalek::PublicKey as X25519PublicKey;
 use ed25519_dalek::VerifyingKey;
+use crate::serializable_argon2_params::SerializableArgon2Params;
 #[allow(unused_imports)]
 use log::{info, debug, warn, error};
 
@@ -50,6 +51,7 @@ impl Client {
         message: &[u8],
         pow_difficulty: usize,
         ttl: u64, // Added ttl parameter
+        argon2_params: SerializableArgon2Params,
     ) {
         // Compute recipient's address
         let recipient_address = {
@@ -75,6 +77,7 @@ impl Client {
             message,
             pow_difficulty,
             ttl, // Pass ttl
+            argon2_params,
         );
 
         // Send the packet to the connected node

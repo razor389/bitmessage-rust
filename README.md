@@ -25,7 +25,7 @@ This implementation includes several planned features to enhance the functionali
 - **Node Connectivity**: Running nodes with IP and port bindings for network communication.
 - **Acknowledgment of Messages**: Implementing acknowledgments to ensure message delivery.
 - **Node Communication**: Facilitating reliable communication between nodes, maintaining node lists/hashmaps to route messages efficiently.
-- **PoW Parameters**: Allow clients to adjust the memory/core allocation for Argon2id; clients should be able to set parameters.
+
 
 ### Scalability and Filtering
 
