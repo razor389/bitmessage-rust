@@ -71,6 +71,18 @@ impl Node {
             }
         }
 
+        // **Check for Duplicate Packet**
+    {
+        let messages = self.messages.lock().unwrap();
+        if messages.contains_key(&packet.pow_hash) {
+            info!(
+                "Node {} already has packet with pow_hash {:?}, ignoring duplicate",
+                self.id, packet.pow_hash
+            );
+            return; // Ignore the duplicate packet
+        }
+    }
+
         // Verify Argon2id parameters
         if !self.is_acceptable_argon2_params(&packet.argon2_params) {
             warn!(
