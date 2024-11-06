@@ -1,10 +1,7 @@
 // src/packet.rs
+use zstd::stream::encode_all;
+use zstd::stream::decode_all;
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use std::io::Write;
-use flate2::read::GzDecoder;
-use std::io::Read;
 use serde::{Serialize, Deserialize};
 use ed25519_dalek::{Signature, VerifyingKey};
 use x25519_dalek::PublicKey as X25519PublicKey;
@@ -73,24 +70,17 @@ impl Packet {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        // Serialize the packet using bincode
         let serialized_data = bincode::serialize(&self).expect("Failed to serialize packet");
 
-        // Compress the serialized data using Gzip
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&serialized_data).expect("Failed to write data to encoder");
-        let compressed_data = encoder.finish().expect("Failed to finish compression");
+        let compression_level = 0; // Adjust between -5 (fastest) and 22 (best compression)
+        let compressed_data = encode_all(&serialized_data[..], compression_level).expect("Failed to compress data");
 
         compressed_data
     }
 
     pub fn deserialize(data: &[u8]) -> Packet {
-        // Decompress the data using Gzip
-        let mut decoder = GzDecoder::new(data);
-        let mut decompressed_data = Vec::new();
-        decoder.read_to_end(&mut decompressed_data).expect("Failed to decompress data");
+        let decompressed_data = decode_all(&data[..]).expect("Failed to decompress data");
 
-        // Deserialize the packet using bincode
         bincode::deserialize(&decompressed_data).expect("Failed to deserialize packet")
     }
 
@@ -105,11 +95,21 @@ impl Packet {
         argon2_params: SerializableArgon2Params,
     ) -> Self {
         info!("Creating signed and encrypted packet");
-        // Step 1: Sign the message
-        let signature = auth.sign_message(message).to_bytes().to_vec();
 
-        // Step 2: Encrypt the message
-        let (ciphertext, nonce) = encryption.encrypt_message(recipient_public_key, message);
+        // **Compress the message before signing and encrypting**
+        let compression_level = 0; // Adjust as needed
+        let compressed_message =
+            encode_all(&message[..], compression_level).expect("Failed to compress message");
+
+        // Step 1: Sign the compressed message
+        let signature = auth
+            .sign_message(&compressed_message)
+            .to_bytes()
+            .to_vec();
+
+        // Step 2: Encrypt the compressed message
+        let (ciphertext, nonce) =
+            encryption.encrypt_message(recipient_public_key, &compressed_message);
 
         // Step 3: Prepare the Packet data for PoW (excluding pow_nonce and pow_hash)
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -182,24 +182,27 @@ impl Packet {
         }
 
         // Step 2: Decrypt the message
-        let decrypted_message =
+        let decrypted_compressed_message =
             encryption.decrypt_message(sender_public_key, &self.nonce, &self.ciphertext);
 
-        // Step 3: Verify the signature
+        // **Step 3: Verify the signature over the compressed message**
         let verifying_key = VerifyingKey::from_bytes(&self.signing_public_key).ok()?;
 
         let signature_bytes: &[u8; 64] = self.signature.as_slice().try_into().ok()?;
         let signature = Signature::from_bytes(signature_bytes);
 
-        if Authentication::verify_message_with_key(
-            &decrypted_message,
+        if !Authentication::verify_message_with_key(
+            &decrypted_compressed_message,
             &signature,
             &verifying_key,
         ) {
-            Some(decrypted_message)
-        } else {
-            None
+            return None;
         }
+
+        // **Step 4: Decompress the decrypted message**
+        let decompressed_message = decode_all(&decrypted_compressed_message[..]).ok()?;
+
+        Some(decompressed_message)
     }
 
     pub fn verify_pow(&self, pow_difficulty: usize) -> bool {
