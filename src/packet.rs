@@ -1,5 +1,10 @@
 // src/packet.rs
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use std::io::Write;
+use flate2::read::GzDecoder;
+use std::io::Read;
 use serde::{Serialize, Deserialize};
 use ed25519_dalek::{Signature, VerifyingKey};
 use x25519_dalek::PublicKey as X25519PublicKey;
@@ -68,11 +73,25 @@ impl Packet {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        bincode::serialize(&self).expect("Failed to serialize packet")
+        // Serialize the packet using bincode
+        let serialized_data = bincode::serialize(&self).expect("Failed to serialize packet");
+
+        // Compress the serialized data using Gzip
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&serialized_data).expect("Failed to write data to encoder");
+        let compressed_data = encoder.finish().expect("Failed to finish compression");
+
+        compressed_data
     }
 
     pub fn deserialize(data: &[u8]) -> Packet {
-        bincode::deserialize(data).expect("Failed to deserialize packet")
+        // Decompress the data using Gzip
+        let mut decoder = GzDecoder::new(data);
+        let mut decompressed_data = Vec::new();
+        decoder.read_to_end(&mut decompressed_data).expect("Failed to decompress data");
+
+        // Deserialize the packet using bincode
+        bincode::deserialize(&decompressed_data).expect("Failed to deserialize packet")
     }
 
     pub fn create_signed_encrypted(
