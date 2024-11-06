@@ -4,16 +4,20 @@
 mod tests {
     use bitmessage_rust::authentication::Authentication;
     use bitmessage_rust::encryption::Encryption;
-    use bitmessage_rust::packet::Packet;
+    use bitmessage_rust::packet::{Packet, ADDRESS_LENGTH};
     use bitmessage_rust::pow::{PoW, PoWAlgorithm};
-    use bitmessage_rust::serializable_argon2_params::SerializableArgon2Params; // Import the SerializableArgon2Params
+    use bitmessage_rust::serializable_argon2_params::SerializableArgon2Params;
     use argon2::Params as Argon2Params;
     use env_logger;
     #[allow(unused_imports)]
     use log::{info, debug, warn, error};
+    use sha2::{Digest, Sha256};
+    use x25519_dalek::PublicKey as X25519PublicKey;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
 
-    #[test]
-    fn test_encryption_decryption() {
+    #[tokio::test]
+    async fn test_encryption_decryption() {
         let encryption_a = Encryption::new();
         let encryption_b = Encryption::new();
 
@@ -26,8 +30,8 @@ mod tests {
         assert_eq!(plaintext, message);
     }
 
-    #[test]
-    fn test_signing_verification() {
+    #[tokio::test]
+    async fn test_signing_verification() {
         let auth_a = Authentication::new();
         let auth_b = Authentication::new();
 
@@ -52,12 +56,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_signed_encrypted_message() {
-        use sha2::{Digest, Sha256};
-        use x25519_dalek::PublicKey as X25519PublicKey;
-        use bitmessage_rust::packet::ADDRESS_LENGTH;
-
+    #[tokio::test]
+    async fn test_signed_encrypted_message() {
         let auth_sender = Authentication::new();
         let enc_sender = Encryption::new();
         let auth_receiver = Authentication::new();
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_pow_verify_pow() {
-        let data = "hello world";
+        let data = b"hello world";
         let difficulty = 1;
         let algorithm = PoWAlgorithm::Argon2id(Argon2Params::new(512, 1, 8, Some(32)).unwrap());
         let pow = PoW::new(data, difficulty, algorithm).unwrap();
@@ -130,14 +130,10 @@ mod tests {
         assert!(pow.verify_pow(&hash, nonce));
     }
 
-    #[test]
-    fn test_client_node_communication() {
-        use std::sync::Arc;
-        use bitmessage_rust::authentication::Authentication;
+    #[tokio::test]
+    async fn test_client_node_communication() {
         use bitmessage_rust::client::Client;
-        use bitmessage_rust::encryption::Encryption;
         use bitmessage_rust::node::Node;
-        use env_logger;
 
         // Initialize the logger
         let _ = env_logger::builder().is_test(true).try_init();
@@ -149,6 +145,10 @@ mod tests {
         let auth_b = Authentication::new();
         let enc_b = Encryption::new();
 
+        // Extract public keys before moving into clients
+        let auth_b_verifying_key = auth_b.verifying_key();
+        let enc_b_public_key = enc_b.our_public_key;
+
         // Define Argon2id parameters
         let argon2_params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
         let serializable_params = SerializableArgon2Params::from_argon2_params(&argon2_params);
@@ -156,49 +156,60 @@ mod tests {
         // Define node's minimum acceptable parameters
         let min_argon2_params = serializable_params.clone();
 
-        // Create dummy node to compute clients' addresses
-        let dummy_node = Arc::new(Node::new(
-            0,
+        // Set up addresses for nodes (use loopback addresses with different ports)
+        let address_a: SocketAddr = "127.0.0.1:6000".parse().unwrap();
+        let address_b: SocketAddr = "127.0.0.1:6001".parse().unwrap();
+
+        // Create nodes with unique IDs and PoW difficulty
+        let node_a = Node::new(
+            1,
             vec![],
             1,
             3600,
             min_argon2_params.clone(),
-        )); // Max TTL of 1 hour
+            address_a,
+        ).await;
 
-        // Create clients connected to the dummy node
-        let client_a = Client::new(auth_a, enc_a, Arc::clone(&dummy_node));
-        let client_b = Client::new(auth_b, enc_b, Arc::clone(&dummy_node));
-
-        // Compute node prefixes based on clients' addresses
-        let prefix_length = 1; // Adjust as needed for testing
-        let node_a_prefix = client_a.address[..prefix_length].to_vec();
-        let node_b_prefix = client_b.address[..prefix_length].to_vec();
-
-        let pow_difficulty = 1; // Adjust for testing purposes
-
-        // Create nodes with unique IDs and PoW difficulty, using prefixes derived from clients' addresses
-        let node_a = Arc::new(Node::new(
-            1,
-            node_a_prefix.clone(),
-            pow_difficulty,
-            3600,
-            min_argon2_params.clone(),
-        )); // Max TTL of 1 hour
-        let node_b = Arc::new(Node::new(
+        let node_b = Node::new(
             2,
-            node_b_prefix.clone(),
-            pow_difficulty,
+            vec![],
+            1,
             3600,
             min_argon2_params.clone(),
-        )); // Max TTL of 1 hour
+            address_b,
+        ).await;
 
-        // Connect nodes to each other
-        node_a.connect(Arc::clone(&node_b));
-        node_b.connect(Arc::clone(&node_a));
+        // Start nodes
+        node_a.start_gossip();
+        node_b.start_gossip();
 
-        // Update clients to connect to their respective nodes
-        let client_a = Client::new(client_a.auth, client_a.encryption, Arc::clone(&node_a));
-        let client_b = Client::new(client_b.auth, client_b.encryption, Arc::clone(&node_b));
+        // Node A connects to Node B
+        node_a.connect_sender.send(address_b).await.unwrap();
+
+        // Node B connects to Node A
+        node_b.connect_sender.send(address_a).await.unwrap();
+
+        // Spawn tasks to run the nodes
+        let node_a_clone = Arc::clone(&node_a);
+        tokio::spawn(async move {
+            if let Err(e) = node_a_clone.run().await {
+                error!("Node A failed: {:?}", e);
+            }
+        });
+
+        let node_b_clone = Arc::clone(&node_b);
+        tokio::spawn(async move {
+            if let Err(e) = node_b_clone.run().await {
+                error!("Node B failed: {:?}", e);
+            }
+        });
+
+        // Allow some time for nodes to start and connect
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        // Create clients connected to their respective nodes
+        let client_a = Client::new(auth_a, enc_a, address_a);
+        let client_b = Client::new(auth_b, enc_b, address_b);
 
         // Client A sends a message to Client B
         let message = b"Hello, Client B!";
@@ -206,16 +217,19 @@ mod tests {
         let ttl = 3600; // TTL of 1 hour
 
         client_a.send_message(
-            &client_b.auth.verifying_key(),       // Recipient's verifying key
-            &client_b.encryption.our_public_key,  // Recipient's DH public key
+            &auth_b_verifying_key,    // Recipient's verifying key
+            &enc_b_public_key,        // Recipient's DH public key
             message,
-            pow_difficulty,
-            ttl,                      // Include ttl
-            serializable_params.clone(), // Pass the SerializableArgon2Params
-        );
+            1,                             // PoW difficulty
+            ttl,                           // Include ttl
+            serializable_params.clone(),   // Pass the SerializableArgon2Params
+        ).await;
 
-        // Client B retrieves messages (all messages from its node)
-        let received_messages = client_b.receive_messages(pow_difficulty);
+        // Allow some time for the message to propagate
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // Client B retrieves messages
+        let received_messages = client_b.receive_messages(1).await;
 
         // Verify that Client B received and decrypted the message from Client A
         assert_eq!(received_messages.len(), 1);
