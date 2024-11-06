@@ -18,7 +18,6 @@ This implementation includes several planned features to enhance the functionali
 
 ### Planned Features (TODO)
 
-- **Message Compression**: Reducing the message size for efficient storage and transmission.
 - **Address Broadcasting**: Enabling nodes to broadcast their address and keys to other nodes.
 - **Key Retrieval**: Allowing nodes to request public keys from specific addresses.
 - **Node Connectivity**: Running nodes with IP and port bindings for network communication.
