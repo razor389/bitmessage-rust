@@ -68,6 +68,8 @@ mod tests {
             address
         };
 
+        let ttl = 60; //arbitrary here
+
         // Sender creates a packet to send to the receiver
         let packet = Packet::create_signed_encrypted(
             &auth_sender,
@@ -76,6 +78,7 @@ mod tests {
             recipient_address, // Include recipient address
             message,
             pow_difficulty,
+            ttl,
         );
 
         // Receiver verifies and decrypts the packet
@@ -132,22 +135,22 @@ mod tests {
         let auth_b = Authentication::new();
         let enc_b = Encryption::new();
 
-        // Create dummy nodes to compute clients' addresses
-        let dummy_node = Arc::new(Node::new(0, vec![], 1));
+        // Create dummy node to compute clients' addresses
+        let dummy_node = Arc::new(Node::new(0, vec![], 1, 3600)); // Max TTL of 1 hour
 
         // Create clients connected to the dummy node
         let client_a = Client::new(auth_a, enc_a, Arc::clone(&dummy_node));
         let client_b = Client::new(auth_b, enc_b, Arc::clone(&dummy_node));
 
         // Compute node prefixes based on clients' addresses
-        let prefix_length = 5; // Adjust as needed for testing
+        let prefix_length = 1; // Adjust as needed for testing
         let node_a_prefix = client_a.address[..prefix_length].to_vec();
         let node_b_prefix = client_b.address[..prefix_length].to_vec();
 
         // Create nodes with unique IDs and PoW difficulty, using prefixes derived from clients' addresses
         let pow_difficulty = 1; // Adjust for testing purposes
-        let node_a = Arc::new(Node::new(1, node_a_prefix.clone(), pow_difficulty));
-        let node_b = Arc::new(Node::new(2, node_b_prefix.clone(), pow_difficulty));
+        let node_a = Arc::new(Node::new(1, node_a_prefix.clone(), pow_difficulty, 3600)); // Max TTL of 1 hour
+        let node_b = Arc::new(Node::new(2, node_b_prefix.clone(), pow_difficulty, 3600)); // Max TTL of 1 hour
 
         // Connect nodes to each other
         node_a.connect(Arc::clone(&node_b));
@@ -168,11 +171,14 @@ mod tests {
         // Client A sends a message to Client B
         let message = b"Hello, Client B!";
 
+        let ttl = 3600; // TTL of 1 hour
+
         client_a.send_message(
             &client_b.auth.verifying_key(), // Recipient's verifying key
             &client_b.encryption.our_public_key, // Recipient's DH public key
             message,
             pow_difficulty,
+            ttl, // Include ttl
         );
 
         // Client B retrieves messages (all messages from its node)
@@ -182,6 +188,5 @@ mod tests {
         assert_eq!(received_messages.len(), 1);
         assert_eq!(received_messages[0].as_slice(), message);
     }
-
 
 }

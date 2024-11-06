@@ -49,6 +49,7 @@ impl Client {
         recipient_dh_public_key: &X25519PublicKey, // Recipient's DH public key
         message: &[u8],
         pow_difficulty: usize,
+        ttl: u64, // Added ttl parameter
     ) {
         // Compute recipient's address
         let recipient_address = {
@@ -73,6 +74,7 @@ impl Client {
             recipient_address, // Pass recipient_address
             message,
             pow_difficulty,
+            ttl, // Pass ttl
         );
 
         // Send the packet to the connected node

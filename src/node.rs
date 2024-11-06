@@ -1,28 +1,34 @@
 // src/node.rs
 
 use crate::packet::Packet;
-use std::{collections::HashSet, sync::{Arc, Mutex}};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 #[allow(unused_imports)]
 use log::{info, debug, warn, error};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Node {
     pub id: usize, // Unique identifier for the node
     pub prefix: Vec<u8>, // The address prefix this node is responsible for
-    pub messages: Arc<Mutex<Vec<Packet>>>, // Store all messages in a single vector
+    pub messages: Arc<Mutex<HashMap<Vec<u8>, Packet>>>, // Store messages in a hash map
     pub connected_nodes: Arc<Mutex<Vec<Arc<Node>>>>, // Wrap in Arc<Mutex<...>> to allow mutation
     pub pow_difficulty: usize, // PoW difficulty level
+    pub max_ttl: u64,          // Max TTL in seconds
     pub blacklist: Arc<Mutex<HashSet<usize>>>, // Blacklisted node IDs
 }
 
 impl Node {
-    pub fn new(id: usize, prefix: Vec<u8>, pow_difficulty: usize) -> Self {
+    pub fn new(id: usize, prefix: Vec<u8>, pow_difficulty: usize, max_ttl: u64) -> Self {
         info!("Node {} created with prefix {:?}", id, prefix);
         Node {
             id,
             prefix,
-            messages: Arc::new(Mutex::new(Vec::new())),
+            messages: Arc::new(Mutex::new(HashMap::new())),
             connected_nodes: Arc::new(Mutex::new(Vec::new())),
             pow_difficulty,
+            max_ttl,
             blacklist: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -74,13 +80,31 @@ impl Node {
             return;
         }
 
+        // Check TTL
+        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        if packet.ttl > self.max_ttl {
+            warn!(
+                "Node {} received packet with TTL {} exceeding max TTL {}",
+                self.id, packet.ttl, self.max_ttl
+            );
+            return; // Discard the packet
+        }
+
+        if current_time > packet.timestamp + packet.ttl {
+            warn!(
+                "Node {} received packet with expired TTL",
+                self.id
+            );
+            return; // Discard the packet
+        }
+
         let packet_address = packet.recipient_address;
 
         // Store the packet if the recipient address matches the node's prefix
         if packet_address.starts_with(&self.prefix) {
             // Store the packet
             let mut messages = self.messages.lock().unwrap();
-            messages.push(packet.clone());
+            messages.insert(packet.pow_hash.clone(), packet.clone());
             info!(
                 "Node {} stored packet. Total messages stored: {}",
                 self.id,
@@ -123,6 +147,7 @@ impl Node {
 
     // Retrieve all messages stored in the node
     pub fn get_all_messages(&self) -> Vec<Packet> {
+        self.purge_expired_messages(); // Purge expired messages before returning
         let messages = self.messages.lock().unwrap();
         info!(
             "Node {} with prefix {:?} providing {} messages",
@@ -130,6 +155,15 @@ impl Node {
             self.prefix,
             messages.len()
         );
-        messages.clone()
+        messages.values().cloned().collect()
+    }
+
+    // Purge expired messages
+    fn purge_expired_messages(&self) {
+        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let mut messages = self.messages.lock().unwrap();
+        messages.retain(|_, packet| {
+            current_time <= packet.timestamp + packet.ttl
+        });
     }
 }

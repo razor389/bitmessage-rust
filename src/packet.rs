@@ -7,6 +7,7 @@ use x25519_dalek::PublicKey as X25519PublicKey;
 
 use crate::{authentication::Authentication, encryption::Encryption, pow::{PoW, PoWAlgorithm}};
 use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
 #[allow(unused_imports)]
 use log::{info, debug, warn, error};
 
@@ -23,6 +24,8 @@ pub struct Packet {
     pub pow_nonce: u64,
     pub pow_hash: Vec<u8>,
     pub recipient_address: Address, // Added recipient_address
+    pub timestamp: u64, // UNIX timestamp in seconds
+    pub ttl: u64,       // Time to live in seconds
 }
 
 impl Packet {
@@ -35,6 +38,8 @@ impl Packet {
         pow_nonce: u64,
         pow_hash: Vec<u8>,
         recipient_address: Address, // Added recipient_address
+        timestamp: u64,
+        ttl: u64,
     ) -> Self {
         Packet {
             signing_public_key,
@@ -45,6 +50,8 @@ impl Packet {
             pow_nonce,
             pow_hash,
             recipient_address, // Added recipient_address
+            timestamp,
+            ttl,
         }
     }
 
@@ -73,6 +80,7 @@ impl Packet {
         recipient_address: Address, // Added recipient_address
         message: &[u8],
         pow_difficulty: usize,
+        ttl: u64, // Added ttl
     ) -> Self {
         info!("Creating signed and encrypted packet");
         // Step 1: Sign the message
@@ -82,6 +90,8 @@ impl Packet {
         let (ciphertext, nonce) = encryption.encrypt_message(recipient_public_key, message);
 
         // Step 3: Prepare the Packet data for PoW (excluding pow_nonce and pow_hash)
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+
         let mut packet = Packet {
             signing_public_key: auth.verifying_key().to_bytes(),
             dh_public_key: *encryption.our_public_key.as_bytes(),
@@ -91,6 +101,8 @@ impl Packet {
             pow_nonce: 0,
             pow_hash: Vec::new(),
             recipient_address, // Include recipient_address
+            timestamp,
+            ttl,
         };
 
         let packet_data = packet.serialize();
@@ -111,7 +123,7 @@ impl Packet {
 
         packet
     }
-    
+
     pub fn verify_and_decrypt(
         &self,
         encryption: &Encryption,
@@ -131,7 +143,9 @@ impl Packet {
             signature: self.signature.clone(),
             pow_nonce: 0,
             pow_hash: Vec::new(),
-            recipient_address: self.recipient_address, // Include recipient_address
+            recipient_address: self.recipient_address,
+            timestamp: self.timestamp,
+            ttl: self.ttl,
         };
 
         let packet_data = packet_without_pow.serialize();
@@ -180,6 +194,8 @@ impl Packet {
             pow_nonce: 0,
             pow_hash: Vec::new(),
             recipient_address: self.recipient_address,
+            timestamp: self.timestamp,
+            ttl: self.ttl,
         };
 
         let packet_data = packet_without_pow.serialize();
