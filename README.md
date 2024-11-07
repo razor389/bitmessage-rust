@@ -18,13 +18,13 @@ This implementation includes several planned features to enhance the functionali
 
 ### Planned Features (TODO)
 
-- **Handshake**: When connecting to a node, the node should tell you what recipient address prefix it accepts, what the max ttl is, what the pow difficulty is, what the min argon2 params are, and what (non blacklisted) nodes it knows (and thier prefixes). you should tell the node if you are another node (and thus the node will assume you want to receive gossip and message forwarding, and will store your id/address/etc), in which case it will get this info from you.
+- **Handshake**: When connecting to a node, the node should tell you what recipient address prefix it accepts, what the max ttl is, what the pow difficulty is, what the min argon2 params are, and what (non blacklisted) nodes it knows (and their prefixes). you should tell the node if you are another node (and thus the node will assume you want to receive gossip and message forwarding, and will store your id/address/etc), in which case it will get this info from you.
 - **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
 - **Acknowledgment of Messages**: Implementing optional acknowledgments to ensure message delivery.
 - **Integration Testing**: adequate tests for every function
 - **Weakness Analysis**: Identifying flaws in the protocol, including the potential for associating sender addresses with IPs.
 - **Group Messaging**: Bitmessage group messaging.
-- **TOR-type Routing**: Bouncing a message through TOR or intermediate nodes before hitting the target node to obscure the source IP.
+- **TOR-type Routing**: Bouncing a message through intermediate nodes before hitting the target node to obscure the source IP.
 - **Node Prefix-Based Forwarding**: Propagating messages only to nodes with matching prefixes.
 - **Node Prefix Adjustments**: Dynamic prefix adjustments based on node traffic analysis and peer node visibility
 - **Node Traffic Analysis**: Helping nodes decide their optimal prefix level.
