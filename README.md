@@ -23,7 +23,9 @@ This implementation includes several planned features to enhance the functionali
 - **Acknowledgment of Messages**: Implementing acknowledgments to ensure message delivery.
 - **Node Blacklisting**: If node A is blacklisted for node B, node B refuses any connections from that IP.
 - **Integration testing**: More tests for node discovery
-- **Weakness Analysis**: What are the flaws in the protocol?
+- **Weakness Analysis**: What are the flaws in the protocol? From network analysis, you could associate a sender address / keys with an IP address. If everyone uses different sender/receiver addresses, the problem is mitigated. You can possibly pinpoint sources accurately but not destination IPs. How strong is the encryption/authentication? How disruptable is the network?
+- **Group Messaging**: Bitmessage group messaging?
+- **TOR-type routing**: Could you bounce a message through TOR before hitting the target node(s)? This would obscure the source IP to some reasonably strong degree.
 - **Node Prefix-Based Forwarding**: Only propagate to nodes with prefix matching message
 - **Node TTL Capping**: Rather than discarding messages w/ ttl too long
 - **Node Prefix Adjustments**: Nodes can move up and down prefix levels by choice (shorter prefix hosts more messages), if a node can't see the other prefix at or above its level (so 011 nodeshould be able to see a 010 or a 01 node), it should move up a level (in this case, to 01, to host those messages). Nodes should be able to refuse any message relays that aren't for its prefix, and blacklist on that basis. A node should always help you discover other nodes though. The peer database should have some convenient prefix listing or be in a hash map (prefix): nodes serving that prefix. A node should broadcast changes in its own prefix.
