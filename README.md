@@ -27,7 +27,7 @@ This implementation includes several planned features to enhance the functionali
 - **Group Messaging**: Bitmessage group messaging.
 - **TOR-type Routing**: Bouncing a message through TOR or intermediate nodes before hitting the target node to obscure the source IP.
 - **Node Prefix-Based Forwarding**: Propagating messages only to nodes with matching prefixes.
-- **Node TTL Capping**: Discarding messages with excessive TTLs.
+- **Node TTL Capping**: Rather than discarding messages with excessive TTLs.
 - **Node Prefix Adjustments**: Dynamic prefix adjustments based on node traffic analysis.
 - **Node Traffic Analysis**: Helping nodes decide their optimal prefix level.
 
