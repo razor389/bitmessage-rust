@@ -110,7 +110,7 @@ mod tests {
     fn test_pow_algorithm_argon2id() {
         let data = b"hello world";
         let nonce = 12345u64;
-        let params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
+        let params = Argon2Params::new(512, 1, 8, Some(32)).unwrap();
         let expected_hash = PoWAlgorithm::calculate_argon2id(data, nonce, &params);
 
         let hash = PoWAlgorithm::calculate_argon2id(data, nonce, &params);

@@ -1,17 +1,20 @@
 // src/client/client.rs
 
-use crate::authentication::Authentication;
-use crate::encryption::Encryption;
-use crate::packet::{Address, Packet, ADDRESS_LENGTH};
-use crate::node::peer::Message;
+use crate::{
+    authentication::Authentication,
+    encryption::Encryption,
+    packet::{Packet, Address, ADDRESS_LENGTH},
+    serializable_argon2_params::SerializableArgon2Params,
+    common::{HandshakeInfo, Message},
+};
 use sha2::{Digest, Sha256};
 use x25519_dalek::PublicKey as X25519PublicKey;
 use ed25519_dalek::VerifyingKey;
-use crate::serializable_argon2_params::SerializableArgon2Params;
-use log::{info, error};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::net::SocketAddr;
+use log::{info, error};
+use bincode;
 
 pub struct Client {
     pub auth: Authentication,
@@ -81,11 +84,17 @@ impl Client {
             argon2_params,
         );
 
-        // Send the packet to the node
-        let msg = Message::Packet(packet);
-
+        // Send the packet to the node with handshake
         match TcpStream::connect(self.node_address).await {
             Ok(mut stream) => {
+                // Perform handshake
+                if let Err(e) = self.perform_handshake(&mut stream).await {
+                    error!("Handshake failed: {:?}", e);
+                    return;
+                }
+
+                // Send the packet
+                let msg = Message::Packet(packet);
                 let data = match bincode::serialize(&msg) {
                     Ok(d) => d,
                     Err(e) => {
@@ -114,6 +123,12 @@ impl Client {
 
         match TcpStream::connect(self.node_address).await {
             Ok(mut stream) => {
+                // Perform handshake
+                if let Err(e) = self.perform_handshake(&mut stream).await {
+                    error!("Handshake failed: {:?}", e);
+                    return Vec::new();
+                }
+
                 // Send a request for all messages
                 let request = Message::RequestAllMessages;
                 let data = match bincode::serialize(&request) {
@@ -197,6 +212,83 @@ impl Client {
                 error!("Failed to connect to node: {:?}", e);
                 Vec::new()
             }
+        }
+    }
+
+    // Perform handshake with the node
+    async fn perform_handshake(&self, stream: &mut TcpStream) -> tokio::io::Result<()> {
+        // Create HandshakeInfo
+        let handshake = HandshakeInfo {
+            prefix: vec![], // Assuming empty prefix for client; adjust as needed
+            max_ttl: 3600,
+            pow_difficulty: 1,
+            min_argon2_params: SerializableArgon2Params::default(), // Define default or specific params
+            known_nodes: vec![], // Clients may not have known nodes
+            is_node: false, // Clients are not nodes
+            id: 0,          // Assign a unique ID for the client if needed
+            address: self.node_address, // Clients may not have their own address; adjust as needed
+        };
+
+        // Serialize and send the handshake
+        let msg = Message::Handshake(handshake);
+        let data = match bincode::serialize(&msg) {
+            Ok(d) => d,
+            Err(e) => {
+                error!("Failed to serialize handshake message: {:?}", e);
+                return Err(tokio::io::Error::new(tokio::io::ErrorKind::Other, e));
+            }
+        };
+        let length = (data.len() as u32).to_be_bytes();
+        stream.write_all(&length).await?;
+        stream.write_all(&data).await?;
+
+        // Await node's handshake response
+        let reader = stream;
+
+        // Read the length of the incoming message
+        let mut length_bytes = [0u8; 4];
+        reader.read_exact(&mut length_bytes).await?;
+        let length = u32::from_be_bytes(length_bytes) as usize;
+
+        // Read the message data
+        let mut data = vec![0u8; length];
+        reader.read_exact(&mut data).await?;
+
+        // Deserialize the message
+        let response: Message = match bincode::deserialize(&data) {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!("Failed to deserialize handshake response: {:?}", e);
+                return Err(tokio::io::Error::new(tokio::io::ErrorKind::Other, e));
+            }
+        };
+
+        // Process the handshake response
+        match response {
+            Message::Handshake(node_handshake) => {
+                info!(
+                    "Client {:?} received handshake from node: {:?}",
+                    self.address, node_handshake
+                );
+                // Optionally, you can validate node's handshake here
+                Ok(())
+            }
+            _ => {
+                error!("Client expected handshake response but received a different message.");
+                Err(tokio::io::Error::new(tokio::io::ErrorKind::Other, "Invalid handshake response"))
+            }
+        }
+    }
+}
+
+// Implement Default for SerializableArgon2Params if not already implemented
+impl Default for SerializableArgon2Params {
+    fn default() -> Self {
+        SerializableArgon2Params {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+            output_length: Some(32),
         }
     }
 }

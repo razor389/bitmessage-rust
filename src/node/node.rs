@@ -1,6 +1,8 @@
 // src/node/node.rs
 
-use crate::{packet::Packet, serializable_argon2_params::SerializableArgon2Params};
+use crate::{
+    common::{HandshakeInfo, Message}, packet::Packet, serializable_argon2_params::SerializableArgon2Params
+};
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
@@ -12,7 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::peer::{Peer, Message};
+use super::peer::Peer;
 
 pub struct Node {
     pub id: usize,
@@ -88,7 +90,27 @@ impl Node {
         }
     }
 
-    async fn handle_connection(self: Arc<Self>, socket: TcpStream, addr: Option<SocketAddr>) -> tokio::io::Result<()> {
+    pub async fn send_handshake(&self, peer: &Peer) -> tokio::io::Result<()> {
+        let handshake = HandshakeInfo {
+            prefix: self.prefix.clone(),
+            max_ttl: self.max_ttl,
+            pow_difficulty: self.pow_difficulty,
+            min_argon2_params: self.min_argon2_params.clone(),
+            known_nodes: self.get_known_nodes_snapshot().await,
+            is_node: true, // Assuming this node wants to participate in gossip and forwarding
+            id: self.id,
+            address: self.address,
+        };
+        let message = Message::Handshake(handshake);
+        peer.send_message(&message).await
+    }
+
+    pub async fn get_known_nodes_snapshot(&self) -> Vec<SocketAddr> {
+        let known_nodes = self.known_nodes.lock().await;
+        known_nodes.iter().cloned().collect()
+    }
+
+    pub async fn handle_connection(self: Arc<Self>, socket: TcpStream, addr: Option<SocketAddr>) -> tokio::io::Result<()> {
         if let Some(ip) = addr {
             // Refuse handling if IP is blacklisted
             if self.blacklist.lock().await.contains(&ip) {
@@ -96,10 +118,13 @@ impl Node {
                 return Ok(());
             }
         }
-        
+
         let peer = Peer::new(socket, addr).await?;
         let peer_id = peer.id;
         self.peers.lock().await.insert(peer_id, Arc::new(peer.clone()));
+
+        // Send handshake immediately after establishing connection
+        self.send_handshake(&peer).await?;
 
         // Start receiving packets from the peer
         let node_clone = Arc::clone(&self);
@@ -135,8 +160,11 @@ impl Node {
             Ok(socket) => {
                 let peer = Peer::new(socket, Some(addr)).await?;
                 let peer_id = peer.id;
-                let peer_arc = Arc::new(peer);
+                let peer_arc = Arc::new(peer.clone());
                 self.peers.lock().await.insert(peer_id, Arc::clone(&peer_arc));
+
+                // Send handshake immediately after connecting
+                self.send_handshake(&peer).await?;
 
                 // Start receiving packets from the peer
                 let node_clone = Arc::clone(&self);
@@ -187,6 +215,18 @@ impl Node {
                 }
             }
 
+            // Check if handshake is complete
+            {
+                let handshake = peer.handshake_info.lock().await;
+                if handshake.is_none() {
+                    warn!(
+                        "Skipping gossip to peer {} as handshake is not complete",
+                        peer.id
+                    );
+                    continue;
+                }
+            }
+
             let peer = peer.clone();
             let nodes = known_nodes.clone();
             tokio::spawn(async move {
@@ -228,12 +268,76 @@ impl Node {
             && params.p_cost >= self.min_argon2_params.p_cost
     }
 
+    // Handle the HandshakeInfo
+    pub async fn handle_handshake(&self, peer: Arc<Peer>, handshake: HandshakeInfo) {
+        // Validate handshake parameters
+        if !self.is_acceptable_handshake(&handshake) {
+            warn!(
+                "Node {} received unacceptable handshake parameters from peer {}",
+                self.id, peer.id
+            );
+            // Optionally, you can blacklist the peer or close the connection
+            if let Some(addr) = peer.address {
+                self.blacklist_ip(addr).await;
+            }
+            return;
+        }
+
+        // Update node's known nodes with peer's known nodes
+        self.update_known_nodes(handshake.known_nodes).await;
+
+        if handshake.is_node {
+            info!("Peer {} is a node and will participate in gossip and forwarding", peer.id);
+            // Implement any additional logic for nodes here
+        } else {
+            info!("Peer {} is a client and will only send/receive messages", peer.id);
+            // Implement any client-specific logic here
+        }
+
+        // Additional handling based on handshake info can be done here
+    }
+
+    fn is_acceptable_handshake(&self, handshake: &HandshakeInfo) -> bool {
+        // Validate recipient prefix
+        if !handshake.prefix.starts_with(&self.prefix) {
+            return false;
+        }
+
+        // Validate max_ttl
+        if handshake.max_ttl > self.max_ttl {
+            return false;
+        }
+
+        // Validate PoW difficulty
+        if handshake.pow_difficulty < self.pow_difficulty {
+            return false;
+        }
+
+        // Validate Argon2 parameters
+        self.is_acceptable_argon2_params(&handshake.min_argon2_params)
+    }
+
     // Receive a packet and process it
-    pub async fn receive_packet(self: Arc<Self>, packet: Packet, sender_id: Option<usize>) {
+    pub async fn receive_packet(&self, packet: Packet, sender_id: Option<usize>) {
         info!(
             "Node {} received packet destined for address {:?}",
             self.id, packet.recipient_address
         );
+
+        // Ensure that the peer has completed the handshake
+        if let Some(s_id) = sender_id {
+            let peers = self.peers.lock().await;
+            if let Some(peer) = peers.get(&s_id) {
+                let handshake = peer.handshake_info.lock().await;
+                if handshake.is_none() {
+                    warn!(
+                        "Node {} received a packet from peer {} before completing handshake",
+                        self.id, s_id
+                    );
+                    return;
+                }
+            }
+        }
 
         // If the sender is blacklisted, ignore the packet
         if let Some(s_id) = sender_id {

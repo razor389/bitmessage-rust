@@ -1,22 +1,15 @@
-use crate::packet::Packet; 
+// src/peer.rs
+
+use crate::common::{Message, HandshakeInfo};
 use crate::node::Node;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::net::tcp::{ OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use std::net::SocketAddr;
-use log::error;
-use serde::{Serialize, Deserialize};
+use log::{error, info};
 use bincode;
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum Message {
-    Packet(Packet),
-    KnownNodes(Vec<SocketAddr>),
-    RequestAllMessages,
-    MessagesResponse(Vec<Packet>),
-}
 
 #[derive(Clone)]
 pub struct Peer {
@@ -24,6 +17,7 @@ pub struct Peer {
     pub reader: Arc<Mutex<OwnedReadHalf>>,
     pub writer: Arc<Mutex<OwnedWriteHalf>>,
     pub address: Option<SocketAddr>,
+    pub handshake_info: Arc<Mutex<Option<HandshakeInfo>>>, // New field to store handshake info
 }
 
 impl Peer {
@@ -40,6 +34,7 @@ impl Peer {
             reader: Arc::new(Mutex::new(read_half)),
             writer: Arc::new(Mutex::new(write_half)),
             address: peer_address,
+            handshake_info: Arc::new(Mutex::new(None)), // Initialize as None
         };
         Ok(peer)
     }
@@ -116,6 +111,22 @@ impl Peer {
                         if let Err(e) = peer_clone.send_message(&response).await {
                             error!("Failed to send messages to peer {}: {:?}", peer_clone.id, e);
                         }
+                    });
+                }
+                Message::Handshake(handshake) => {
+                    // Store the handshake information
+                    {
+                        let mut handshake_info = self.handshake_info.lock().await;
+                        *handshake_info = Some(handshake.clone());
+                    }
+
+                    info!("Received handshake from peer {}: {:?}", self.id, handshake);
+
+                    // Handle the handshake in the node
+                    let node_clone = Arc::clone(&node);
+                    let peer_clone = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        node_clone.handle_handshake(peer_clone, handshake).await;
                     });
                 }
                 _ => {
