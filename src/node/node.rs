@@ -253,7 +253,7 @@ impl Node {
                 "Node {} received packet with TTL {} exceeding max TTL {}",
                 self.id, packet.ttl, self.max_ttl
             );
-            return; // Discard the packet (TODO: maybe cap ttl?)
+            return; // Discard the packet
         }
 
         if current_time > packet.timestamp + packet.ttl {
