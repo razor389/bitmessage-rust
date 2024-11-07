@@ -24,6 +24,8 @@ This implementation includes several planned features to enhance the functionali
 - **Node Blacklisting**: If node A is blacklisted for node B, node B refuses any connections from that IP.
 - **Integration testing**: More tests for node discovery
 - **Weakness Analysis**: What are the flaws in the protocol?
+- **Node Prefix-Based Forwarding**: Only propagate to nodes with prefix matching message
+- **Node TTL Capping**: Rather than discarding messages w/ ttl too long
 
 ### Scalability and Filtering
 

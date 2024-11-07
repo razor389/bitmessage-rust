@@ -253,7 +253,7 @@ impl Node {
                 "Node {} received packet with TTL {} exceeding max TTL {}",
                 self.id, packet.ttl, self.max_ttl
             );
-            return; // Discard the packet
+            return; // Discard the packet (TODO: maybe cap ttl?)
         }
 
         if current_time > packet.timestamp + packet.ttl {
@@ -264,8 +264,8 @@ impl Node {
             return; // Discard the packet
         }
 
-        // Store the packet
-        {
+        // Store the packet if the recipient address matches the node's prefix
+        if packet.recipient_address.starts_with(&self.prefix){
             let mut messages = self.messages.lock().await;
             messages.insert(packet.pow_hash.clone(), packet.clone());
             info!(
@@ -275,7 +275,7 @@ impl Node {
             );
         }
 
-        // Forward the packet to connected peers
+        // Forward the packet to connected peers (TODO: Only if their prefix matches recipient address)
         let peers = self.peers.lock().await;
         for peer in peers.values() {
             // Avoid forwarding back to the sender
