@@ -21,7 +21,7 @@ pub struct Node {
     pub peers: Arc<Mutex<HashMap<usize, Arc<Peer>>>>,
     pub pow_difficulty: usize,
     pub max_ttl: u64,
-    pub blacklist: Arc<Mutex<HashSet<usize>>>,
+    pub blacklist: Arc<Mutex<HashSet<SocketAddr>>>,
     pub min_argon2_params: SerializableArgon2Params,
     pub address: SocketAddr,
     pub known_nodes: Arc<Mutex<HashSet<SocketAddr>>>,
@@ -73,6 +73,13 @@ impl Node {
         loop {
             let (socket, addr) = listener.accept().await?;
             let node = Arc::clone(&self);
+
+            // Refuse connection if IP is blacklisted
+            if self.blacklist.lock().await.contains(&addr) {
+                warn!("Refusing connection from blacklisted IP: {}", addr);
+                continue;
+            }
+
             tokio::spawn(async move {
                 if let Err(e) = node.handle_connection(socket, Some(addr)).await {
                     error!("Error handling connection from {}: {:?}", addr, e);
@@ -82,6 +89,14 @@ impl Node {
     }
 
     async fn handle_connection(self: Arc<Self>, socket: TcpStream, addr: Option<SocketAddr>) -> tokio::io::Result<()> {
+        if let Some(ip) = addr {
+            // Refuse handling if IP is blacklisted
+            if self.blacklist.lock().await.contains(&ip) {
+                warn!("Ignoring connection from blacklisted IP: {}", ip);
+                return Ok(());
+            }
+        }
+        
         let peer = Peer::new(socket, addr).await?;
         let peer_id = peer.id;
         self.peers.lock().await.insert(peer_id, Arc::new(peer.clone()));
@@ -97,7 +112,6 @@ impl Node {
     }
 
     pub async fn connect_to_peer(self: Arc<Self>, addr: SocketAddr) -> tokio::io::Result<()> {
-        
         if addr == self.address {
             return Ok(()); // Avoid connecting to self
         }
@@ -109,6 +123,12 @@ impl Node {
                 info!("Node {} is already connected to {}", self.id, addr);
                 return Ok(());
             }
+        }
+
+        // Refuse connection if IP is blacklisted
+        if self.blacklist.lock().await.contains(&addr) {
+            warn!("Node {} refusing to connect to blacklisted IP: {}", self.id, addr);
+            return Ok(());
         }
 
         match TcpStream::connect(addr).await {
@@ -153,9 +173,20 @@ impl Node {
 
     async fn gossip_known_nodes(&self) {
         let peers = self.peers.lock().await;
-        let known_nodes: Vec<SocketAddr> = self.known_nodes.lock().await.iter().cloned().collect();
+        let known_nodes: Vec<SocketAddr> = {
+            let known_nodes = self.known_nodes.lock().await;
+            known_nodes.iter().cloned().collect()
+        };
 
         for peer in peers.values() {
+            if let Some(addr) = peer.address {
+                // Skip if the peer's address is blacklisted
+                if self.blacklist.lock().await.contains(&addr) {
+                    warn!("Skipping blacklisted IP {} during gossip", addr);
+                    continue;
+                }
+            }
+
             let peer = peer.clone();
             let nodes = known_nodes.clone();
             tokio::spawn(async move {
@@ -169,6 +200,15 @@ impl Node {
     pub async fn update_known_nodes(&self, nodes: Vec<SocketAddr>) {
         for addr in nodes {
             if addr != self.address {
+                // Check if the addr is blacklisted
+                {
+                    let blacklist = self.blacklist.lock().await;
+                    if blacklist.contains(&addr) {
+                        warn!("Not adding blacklisted IP {} to known nodes", addr);
+                        continue;
+                    }
+                }
+
                 let mut known_nodes = self.known_nodes.lock().await;
                 if !known_nodes.contains(&addr) {
                     known_nodes.insert(addr);
@@ -197,13 +237,18 @@ impl Node {
 
         // If the sender is blacklisted, ignore the packet
         if let Some(s_id) = sender_id {
-            let blacklist = self.blacklist.lock().await;
-            if blacklist.contains(&s_id) {
-                warn!(
-                    "Node {} ignoring packet from blacklisted node {}",
-                    self.id, s_id
-                );
-                return;
+            let peers = self.peers.lock().await;
+            if let Some(peer) = peers.get(&s_id) {
+                if let Some(addr) = peer.address {
+                    let blacklist = self.blacklist.lock().await;
+                    if blacklist.contains(&addr) {
+                        warn!(
+                            "Node {} ignoring packet from blacklisted IP {}",
+                            self.id, addr
+                        );
+                        return;
+                    }
+                }
             }
         }
 
@@ -237,9 +282,12 @@ impl Node {
 
             // Blacklist the sender if known
             if let Some(s_id) = sender_id {
-                let mut blacklist = self.blacklist.lock().await;
-                blacklist.insert(s_id);
-                warn!("Node {} blacklisted node {}", self.id, s_id);
+                let peers = self.peers.lock().await;
+                if let Some(peer) = peers.get(&s_id) {
+                    if let Some(addr) = peer.address {
+                        self.blacklist_ip(addr).await;
+                    }
+                }
             }
 
             // Do not process the packet further
@@ -284,13 +332,15 @@ impl Node {
             }
 
             // Check if the peer is blacklisted
-            let blacklist = self.blacklist.lock().await;
-            if blacklist.contains(&peer.id) {
-                warn!(
-                    "Node {} not forwarding to blacklisted peer {}",
-                    self.id, peer.id
-                );
-                continue;
+            if let Some(addr) = peer.address {
+                let blacklist = self.blacklist.lock().await;
+                if blacklist.contains(&addr) {
+                    warn!(
+                        "Node {} not forwarding to blacklisted peer {} at IP {}",
+                        self.id, peer.id, addr
+                    );
+                    continue;
+                }
             }
 
             // Forward the packet
@@ -324,5 +374,43 @@ impl Node {
         messages.retain(|_, packet| {
             current_time <= packet.timestamp + packet.ttl
         });
+    }
+
+    // Blacklist an IP address and remove it from known nodes and peers
+    pub async fn blacklist_ip(&self, addr: SocketAddr) {
+        {
+            let mut blacklist = self.blacklist.lock().await;
+            if !blacklist.insert(addr) {
+                // IP was already blacklisted
+                return;
+            }
+            info!("Node {} blacklisted IP {}", self.id, addr);
+        }
+
+        // Remove from known nodes
+        {
+            let mut known_nodes = self.known_nodes.lock().await;
+            if known_nodes.remove(&addr) {
+                info!("Node {} removed IP {} from known nodes", self.id, addr);
+            }
+        }
+
+        // Disconnect if connected
+        let peer_to_remove = {
+            let peers = self.peers.lock().await;
+            peers.values()
+                .find(|peer| peer.address == Some(addr))
+                .map(|peer| peer.id)
+        };
+
+        if let Some(peer_id) = peer_to_remove {
+            let mut peers = self.peers.lock().await;
+            peers.remove(&peer_id);
+            info!("Node {} disconnected from blacklisted peer {}", self.id, peer_id);
+        }
+
+        // Ensure we don't try to reconnect
+        // If addr is in the connect queue, it might be attempted again.
+        // We might need to implement logic to prevent this if necessary.
     }
 }

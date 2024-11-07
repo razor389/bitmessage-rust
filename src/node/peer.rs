@@ -1,4 +1,4 @@
-use crate::packet::Packet;
+use crate::packet::Packet; 
 use crate::node::Node;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -29,12 +29,17 @@ pub struct Peer {
 impl Peer {
     pub async fn new(socket: TcpStream, address: Option<SocketAddr>) -> tokio::io::Result<Self> {
         let id = generate_unique_id();
+        let peer_address = if let Some(addr) = address {
+            Some(addr)
+        } else {
+            socket.peer_addr().ok()
+        };
         let (read_half, write_half) = socket.into_split();
         let peer = Peer {
             id,
             reader: Arc::new(Mutex::new(read_half)),
             writer: Arc::new(Mutex::new(write_half)),
-            address,
+            address: peer_address,
         };
         Ok(peer)
     }
