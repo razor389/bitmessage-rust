@@ -26,6 +26,8 @@ This implementation includes several planned features to enhance the functionali
 - **Weakness Analysis**: What are the flaws in the protocol?
 - **Node Prefix-Based Forwarding**: Only propagate to nodes with prefix matching message
 - **Node TTL Capping**: Rather than discarding messages w/ ttl too long
+- **Node Prefix Adjustments**: Nodes can move up and down prefix levels by choice (shorter prefix hosts more messages), if a node can't see the other prefix at or above its level (so 011 nodeshould be able to see a 010 or a 01 node), it should move up a level (in this case, to 01, to host those messages). Nodes should be able to refuse any message relays that aren't for its prefix, and blacklist on that basis. A node should always help you discover other nodes though. The peer database should have some convenient prefix listing or be in a hash map (prefix): nodes serving that prefix. A node should broadcast changes in its own prefix.
+- **Node traffic analysis**: Help node decide what prefix level to set.
 
 ### Scalability and Filtering
 
