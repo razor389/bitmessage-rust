@@ -22,14 +22,14 @@ This implementation includes several planned features to enhance the functionali
 - **Key Retrieval**: Allowing nodes to request public keys from specific addresses.
 - **Acknowledgment of Messages**: Implementing acknowledgments to ensure message delivery.
 - **Node Blacklisting**: If node A is blacklisted for node B, node B refuses any connections from that IP.
-- **Integration testing**: More tests for node discovery
-- **Weakness Analysis**: What are the flaws in the protocol? From network analysis, you could associate a sender address / keys with an IP address. If everyone uses different sender/receiver addresses, the problem is mitigated. You can possibly pinpoint sources accurately but not destination IPs. How strong is the encryption/authentication? How disruptable is the network?
-- **Group Messaging**: Bitmessage group messaging?
-- **TOR-type routing**: Could you bounce a message through TOR before hitting the target node(s)? This would obscure the source IP to some reasonably strong degree.
-- **Node Prefix-Based Forwarding**: Only propagate to nodes with prefix matching message
-- **Node TTL Capping**: Rather than discarding messages w/ ttl too long
-- **Node Prefix Adjustments**: Nodes can move up and down prefix levels by choice (shorter prefix hosts more messages), if a node can't see the other prefix at or above its level (so 011 nodeshould be able to see a 010 or a 01 node), it should move up a level (in this case, to 01, to host those messages). Nodes should be able to refuse any message relays that aren't for its prefix, and blacklist on that basis. A node should always help you discover other nodes though. The peer database should have some convenient prefix listing or be in a hash map (prefix): nodes serving that prefix. A node should broadcast changes in its own prefix.
-- **Node traffic analysis**: Help node decide what prefix level to set.
+- **Integration Testing**: More tests for node discovery.
+- **Weakness Analysis**: Identifying flaws in the protocol, including the potential for associating sender addresses with IPs.
+- **Group Messaging**: Bitmessage group messaging.
+- **TOR-type Routing**: Bouncing a message through TOR or intermediate nodes before hitting the target node to obscure the source IP.
+- **Node Prefix-Based Forwarding**: Propagating messages only to nodes with matching prefixes.
+- **Node TTL Capping**: Discarding messages with excessive TTLs.
+- **Node Prefix Adjustments**: Dynamic prefix adjustments based on node traffic analysis.
+- **Node Traffic Analysis**: Helping nodes decide their optimal prefix level.
 
 ### Scalability and Filtering
 
@@ -73,7 +73,44 @@ We are grateful to the developers of these libraries for their work, which has s
 
 ## Usage
 
-Instructions for running and using RustBitmessage will be added as development progresses.
+RustBitmessage can be used in either **node mode** or **client mode**. 
+
+### Running as a Node
+
+A **node** operates within the Bitmessage network, performing tasks such as connecting to peers, broadcasting messages, and forwarding messages.
+
+1. **Run the Node**: Use the `--node` flag along with the `--address` flag to specify the node’s IP and port, and the `--connect` flag to connect to other nodes.
+
+   ```bash
+   cargo run --release -- --node --address "127.0.0.1:12345" --connect "127.0.0.1:12346"
+   ```
+
+   - **`--node`**: Starts the Bitmessage node.
+   - **`--address`**: Required. Specifies the node’s IP address and port.
+   - **`--connect`**: Optional. Connects to one or more specified nodes. Add additional addresses with space-separated values.
+
+2. **Running and Gossiping**: The node automatically begins running and will attempt to connect to the specified addresses for message gossiping.
+
+### Running as a Client
+
+A **client** interacts with a Bitmessage node, sending and receiving messages.
+
+1. **Run the Client**: Use the `--client` flag along with the `--address` flag to specify the node address to connect to.
+
+   ```bash
+   cargo run --release -- --client --address "127.0.0.1:12345"
+   ```
+
+   - **`--client`**: Starts the Bitmessage client.
+   - **`--address`**: Required. Specifies the node’s IP address and port.
+
+2. **Sending Messages**: The client sends a message (for testing, it sends "Hello, Bitmessage!") to itself. This demonstrates basic message transmission.
+
+3. **Receiving Messages**: The client listens for messages from the node, displaying any received messages in the console.
+
+### Keep the Node Running
+
+To keep the node or client running without interruptions, the program includes a loop that keeps the main thread active.
 
 ## License
 
@@ -85,4 +122,3 @@ This project is licensed under the MIT License. For more details, please see the
 - **`rust-argon2`**: Dual-licensed under the MIT or Apache-2.0 License. See the [rust-argon2 repository](https://github.com/sru-systems/rust-argon2) for details.
 
 Please ensure compliance with all applicable licenses when using this software.
-
