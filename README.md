@@ -18,17 +18,16 @@ This implementation includes several planned features to enhance the functionali
 
 ### Planned Features (TODO)
 
-- **Handshake**: When connecting to a node, the node should tell you what recipient address prefixes it accepts, what the max ttl is, what the pow difficulty is and what the min argon2 params are. you should tell the node if you are another node (and thus want to receive gossip and message forwarding) or if you are a client
-- **Address Broadcasting**: Enabling nodes to broadcast their address and keys to other nodes.
-- **Key Retrieval**: Allowing nodes to request public keys from specific addresses.
-- **Acknowledgment of Messages**: Implementing acknowledgments to ensure message delivery.
+- **Handshake**: When connecting to a node, the node should tell you what recipient address prefixes it accepts, what the max ttl is, what the pow difficulty is, what the min argon2 params are, and what (non blacklisted) nodes it knows (and thier prefixes). you should tell the node if you are another node (and thus the node will assume you want to receive gossip and message forwarding, and will store your id/address/etc), in which case it will get this info from you.
+- **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
+- **Acknowledgment of Messages**: Implementing optional acknowledgments to ensure message delivery.
 - **IP Blacklisting**: If peer A is blacklisted for node B, node B refuses any connections from that IP.
-- **Integration Testing**: More tests for node discovery.
+- **Integration Testing**: adequate tests for every function
 - **Weakness Analysis**: Identifying flaws in the protocol, including the potential for associating sender addresses with IPs.
 - **Group Messaging**: Bitmessage group messaging.
 - **TOR-type Routing**: Bouncing a message through TOR or intermediate nodes before hitting the target node to obscure the source IP.
 - **Node Prefix-Based Forwarding**: Propagating messages only to nodes with matching prefixes.
-- **Node Prefix Adjustments**: Dynamic prefix adjustments based on node traffic analysis.
+- **Node Prefix Adjustments**: Dynamic prefix adjustments based on node traffic analysis and peer node visibility
 - **Node Traffic Analysis**: Helping nodes decide their optimal prefix level.
 
 ### Scalability and Filtering
