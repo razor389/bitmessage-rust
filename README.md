@@ -20,7 +20,7 @@ This implementation includes several planned features to enhance the functionali
 
 - **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
 - **Acknowledgment of Messages**: Implementing optional acknowledgments to ensure message delivery.
-- **Integration Testing**: adequate tests for every function
+- **Integration Testing**: Adequate tests for every function
 - **Weakness Analysis**: Identifying flaws in the protocol, including the potential for associating sender addresses with IPs.
 - **Group Messaging**: Bitmessage group messaging.
 - **TOR-type Routing**: Bouncing a message through intermediate nodes before hitting the target node to obscure the source IP.

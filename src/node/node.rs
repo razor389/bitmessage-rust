@@ -1,7 +1,9 @@
 // src/node/node.rs
 
 use crate::{
-    common::{HandshakeInfo, Message}, packet::Packet, serializable_argon2_params::SerializableArgon2Params
+    common::{HandshakeInfo, Message},
+    packet::Packet,
+    serializable_argon2_params::SerializableArgon2Params,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -10,8 +12,10 @@ use std::{
 };
 #[allow(unused_imports)]
 use log::{info, debug, warn, error};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, mpsc};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::{Mutex, mpsc},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::peer::Peer;
@@ -110,7 +114,11 @@ impl Node {
         known_nodes.iter().cloned().collect()
     }
 
-    pub async fn handle_connection(self: Arc<Self>, socket: TcpStream, addr: Option<SocketAddr>) -> tokio::io::Result<()> {
+    pub async fn handle_connection(
+        self: Arc<Self>,
+        socket: TcpStream,
+        addr: Option<SocketAddr>,
+    ) -> tokio::io::Result<()> {
         if let Some(ip) = addr {
             // Refuse handling if IP is blacklisted
             if self.blacklist.lock().await.contains(&ip) {
@@ -121,7 +129,10 @@ impl Node {
 
         let peer = Peer::new(socket, addr).await?;
         let peer_id = peer.id;
-        self.peers.lock().await.insert(peer_id, Arc::new(peer.clone()));
+        self.peers
+            .lock()
+            .await
+            .insert(peer_id, Arc::new(peer.clone()));
 
         // Send handshake immediately after establishing connection
         self.send_handshake(&peer).await?;
@@ -144,8 +155,19 @@ impl Node {
         // Check if already connected
         {
             let peers = self.peers.lock().await;
-            if peers.values().any(|peer| peer.address == Some(addr)) {
-                info!("Node {} is already connected to {}", self.id, addr);
+            
+            // Collect peer addresses
+            let mut is_already_connected = false;
+            for peer in peers.values() {
+                let peer_addr = peer.address.lock().await.clone();
+                if peer_addr == Some(addr) {
+                    info!("Node {} is already connected to {}", self.id, addr);
+                    is_already_connected = true;
+                    break;
+                }
+            }
+
+            if is_already_connected {
                 return Ok(());
             }
         }
@@ -161,7 +183,10 @@ impl Node {
                 let peer = Peer::new(socket, Some(addr)).await?;
                 let peer_id = peer.id;
                 let peer_arc = Arc::new(peer.clone());
-                self.peers.lock().await.insert(peer_id, Arc::clone(&peer_arc));
+                self.peers
+                    .lock()
+                    .await
+                    .insert(peer_id, Arc::clone(&peer_arc));
 
                 // Send handshake immediately after connecting
                 self.send_handshake(&peer).await?;
@@ -206,8 +231,15 @@ impl Node {
             known_nodes.iter().cloned().collect()
         };
 
-        for peer in peers.values() {
-            if let Some(addr) = peer.address {
+        // Clone peers to avoid holding the lock while spawning tasks
+        let peers_cloned: Vec<Arc<Peer>> = peers.values().cloned().collect();
+
+        drop(peers); // Release the lock
+
+        for peer in peers_cloned {
+            // Obtain the peer's address
+            let addr_opt = *peer.address.lock().await;
+            if let Some(addr) = addr_opt {
                 // Skip if the peer's address is blacklisted
                 if self.blacklist.lock().await.contains(&addr) {
                     warn!("Skipping blacklisted IP {} during gossip", addr);
@@ -227,11 +259,11 @@ impl Node {
                 }
             }
 
-            let peer = peer.clone();
+            let peer_clone = Arc::clone(&peer);
             let nodes = known_nodes.clone();
             tokio::spawn(async move {
-                if let Err(e) = peer.send_known_nodes(&nodes).await {
-                    error!("Failed to send known nodes to peer {}: {:?}", peer.id, e);
+                if let Err(e) = peer_clone.send_known_nodes(&nodes).await {
+                    error!("Failed to send known nodes to peer {}: {:?}", peer_clone.id, e);
                 }
             });
         }
@@ -276,12 +308,19 @@ impl Node {
                 "Node {} received unacceptable handshake parameters from peer {}",
                 self.id, peer.id
             );
-            // Optionally, you can blacklist the peer or close the connection
-            if let Some(addr) = peer.address {
-                self.blacklist_ip(addr).await;
-            }
+            // Blacklist the peer's IP
+            let addr = handshake.address;
+            self.blacklist_ip(addr).await;
             return;
         }
+
+        // Update the peer's address based on handshake
+        peer.update_address(handshake.address).await;
+
+        info!(
+            "Node {} updated peer {} address to {}",
+            self.id, peer.id, handshake.address
+        );
 
         // Update node's known nodes with peer's known nodes
         self.update_known_nodes(handshake.known_nodes).await;
@@ -343,7 +382,8 @@ impl Node {
         if let Some(s_id) = sender_id {
             let peers = self.peers.lock().await;
             if let Some(peer) = peers.get(&s_id) {
-                if let Some(addr) = peer.address {
+                let addr_opt = *peer.address.lock().await;
+                if let Some(addr) = addr_opt {
                     let blacklist = self.blacklist.lock().await;
                     if blacklist.contains(&addr) {
                         warn!(
@@ -388,7 +428,8 @@ impl Node {
             if let Some(s_id) = sender_id {
                 let peers = self.peers.lock().await;
                 if let Some(peer) = peers.get(&s_id) {
-                    if let Some(addr) = peer.address {
+                    let addr_opt = *peer.address.lock().await;
+                    if let Some(addr) = addr_opt {
                         self.blacklist_ip(addr).await;
                     }
                 }
@@ -417,7 +458,7 @@ impl Node {
         }
 
         // Store the packet if the recipient address matches the node's prefix
-        if packet.recipient_address.starts_with(&self.prefix){
+        if packet.recipient_address.starts_with(&self.prefix) {
             let mut messages = self.messages.lock().await;
             messages.insert(packet.pow_hash.clone(), packet.clone());
             info!(
@@ -427,16 +468,21 @@ impl Node {
             );
         }
 
-        // Forward the packet to connected peers (TODO: Only if their prefix matches recipient address)
+        // Forward the packet to connected peers (excluding blacklisted peers)
         let peers = self.peers.lock().await;
-        for peer in peers.values() {
+        // Clone peers to avoid holding the lock while spawning tasks
+        let peers_cloned: Vec<Arc<Peer>> = peers.values().cloned().collect();
+        drop(peers); // Release the lock
+
+        for peer in peers_cloned {
             // Avoid forwarding back to the sender
             if Some(peer.id) == sender_id {
                 continue;
             }
 
             // Check if the peer is blacklisted
-            if let Some(addr) = peer.address {
+            let addr_opt = *peer.address.lock().await;
+            if let Some(addr) = addr_opt {
                 let blacklist = self.blacklist.lock().await;
                 if blacklist.contains(&addr) {
                     warn!(
@@ -448,12 +494,12 @@ impl Node {
             }
 
             // Forward the packet
-            let peer = peer.clone();
+            let peer_clone = Arc::clone(&peer);
             let packet_clone = packet.clone();
             tokio::spawn(async move {
                 let message = Message::Packet(packet_clone);
-                if let Err(e) = peer.send_message(&message).await {
-                    error!("Failed to forward packet to peer {}: {:?}", peer.id, e);
+                if let Err(e) = peer_clone.send_message(&message).await {
+                    error!("Failed to forward packet to peer {}: {:?}", peer_clone.id, e);
                 }
             });
         }
@@ -499,22 +545,31 @@ impl Node {
             }
         }
 
-        // Disconnect if connected
-        let peer_to_remove = {
+        // Collect peers to remove
+        let peers_cloned: Vec<(usize, Arc<Peer>)> = {
             let peers = self.peers.lock().await;
-            peers.values()
-                .find(|peer| peer.address == Some(addr))
-                .map(|peer| peer.id)
+            peers.iter()
+                .map(|(peer_id, peer)| (*peer_id, Arc::clone(peer)))
+                .collect()
         };
 
-        if let Some(peer_id) = peer_to_remove {
-            let mut peers = self.peers.lock().await;
-            peers.remove(&peer_id);
-            info!("Node {} disconnected from blacklisted peer {}", self.id, peer_id);
+        let mut peers_to_remove = Vec::new();
+
+        for (peer_id, peer) in peers_cloned {
+            let peer_addr_opt = *peer.address.lock().await;
+            if peer_addr_opt == Some(addr) {
+                peers_to_remove.push(peer_id);
+            }
         }
 
-        // Ensure we don't try to reconnect
-        // If addr is in the connect queue, it might be attempted again.
-        // We might need to implement logic to prevent this if necessary.
+        for peer_id in peers_to_remove {
+            if let Some(peer) = self.peers.lock().await.remove(&peer_id) {
+                info!("Node {} disconnecting from blacklisted peer {}", self.id, peer_id);
+                peer.shutdown(); // Signal the peer to shut down
+            }
+        }
+
+        // Optionally, prevent future reconnection attempts by removing from known_nodes or connect_sender queue
+        // Implement logic to prevent reconnection if necessary
     }
 }
