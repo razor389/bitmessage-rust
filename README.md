@@ -18,6 +18,7 @@ This implementation includes several planned features to enhance the functionali
 
 ### Planned Features (TODO)
 
+- **Timeouts**: Implement timeouts on read operations
 - **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
 - **Acknowledgment of Messages**: Implementing optional acknowledgments to ensure message delivery.
 - **Integration Testing**: Adequate tests for every function
