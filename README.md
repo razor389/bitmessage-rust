@@ -18,13 +18,15 @@ This implementation includes several planned features to enhance the functionali
 
 ### Planned Features (TODO)
 
+- **Subscription to Node**: Clients/Nodes should be able to subscribe to updates from the node for the node prefix
+- **Sender pub keys should be ephemeral**: But inside the decrypted message we should be able to verify that it came from a particular sender
 - **Timeouts**: Implement timeouts on read operations
 - **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
 - **Acknowledgment of Messages**: Implementing optional acknowledgments to ensure message delivery.
 - **Integration Testing**: Adequate tests for every function
 - **Weakness Analysis**: Identifying flaws in the protocol, including the potential for associating sender addresses with IPs.
 - **Group Messaging**: Bitmessage group messaging.
-- **TOR-type Routing**: Bouncing a message through intermediate nodes before hitting the target node to obscure the source IP.
+- **TOR connectivity to nodes**: Nodes should optionally support connection via TOR. 
 - **Node Prefix-Based Forwarding**: Propagating messages only to nodes with matching prefixes.
 - **Node Prefix Adjustments**: Dynamic prefix adjustments based on node traffic analysis and peer node visibility
 - **Node Traffic Analysis**: Helping nodes decide their optimal prefix level.
