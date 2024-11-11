@@ -38,7 +38,7 @@ ShadowLink relies on several external libraries for its functionality:
 - **[`rspow`](https://github.com/zolagonano/rspow)**: A Rust library for proof-of-work using Argon2id. We use `rspow` for implementing the proof-of-work mechanism in our protocol.
 - **[`rust-argon2`](https://github.com/sru-systems/rust-argon2)**: A Rust implementation of the Argon2 password hashing function. We use `rust-argon2` within `rspow` for the proof-of-work calculations.
 
-We are grateful to the developers of these libraries for their work, which has significantly contributed to the development of RustBitmessage.
+We are grateful to the developers of these libraries for their work, which has significantly contributed to the development of ShadowLink.
 
 ## Getting Started
 
