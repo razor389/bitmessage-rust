@@ -90,7 +90,7 @@ async fn main() {
 
         client.send_message(
             &client.auth.verifying_key(),
-            &client.encryption.our_public_key,
+            &client.encryption.permanent_public_key,
             message,
             pow_difficulty,
             ttl,

@@ -7,7 +7,6 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use x25519_dalek::PublicKey as X25519PublicKey;
 
 use crate::{authentication::Authentication, encryption::Encryption, pow::{PoW, PoWAlgorithm}, serializable_argon2_params::SerializableArgon2Params};
-use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[allow(unused_imports)]
 use log::{info, debug, warn, error};
@@ -17,11 +16,9 @@ pub type Address = [u8; ADDRESS_LENGTH];
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Packet {
-    pub signing_public_key: [u8; 32],
-    pub dh_public_key: [u8; 32],
+    pub ephemeral_dh_public_key: [u8; 32], // Sender's ephemeral DH public key
     pub nonce: [u8; 12],
     pub ciphertext: Vec<u8>,
-    pub signature: Vec<u8>, 
     pub pow_nonce: u64,
     pub pow_hash: Vec<u8>,
     pub recipient_address: Address,
@@ -30,13 +27,20 @@ pub struct Packet {
     pub argon2_params: SerializableArgon2Params,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EncryptedPayload {
+    pub signature: Vec<u8>,
+    pub signing_public_key: [u8; 32],       // Sender's permanent verifying key
+    pub permanent_dh_public_key: [u8; 32],  // Sender's permanent DH public key
+    pub compressed_message: Vec<u8>,
+}
+
+
 impl Packet {
     pub fn new(
-        signing_public_key: [u8; 32],
-        dh_public_key: [u8; 32],
+        ephemeral_dh_public_key: [u8; 32],
         nonce: [u8; 12],
         ciphertext: Vec<u8>,
-        signature: Vec<u8>,
         pow_nonce: u64,
         pow_hash: Vec<u8>,
         recipient_address: Address, // Added recipient_address
@@ -45,11 +49,9 @@ impl Packet {
         argon2_params: SerializableArgon2Params,
     ) -> Self {
         Packet {
-            signing_public_key,
-            dh_public_key,
+            ephemeral_dh_public_key,
             nonce,
             ciphertext,
-            signature,
             pow_nonce,
             pow_hash,
             recipient_address, // Added recipient_address
@@ -57,16 +59,6 @@ impl Packet {
             ttl,
             argon2_params,
         }
-    }
-
-    pub fn compute_address(&self) -> Address {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.signing_public_key);
-        hasher.update(&self.dh_public_key);
-        let result = hasher.finalize();
-        let mut address = [0u8; ADDRESS_LENGTH];
-        address.copy_from_slice(&result[..ADDRESS_LENGTH]);
-        address
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -87,7 +79,7 @@ impl Packet {
     pub fn create_signed_encrypted(
         auth: &Authentication,
         encryption: &Encryption,
-        recipient_public_key: &X25519PublicKey,
+        recipient_public_dh_key: &X25519PublicKey, // Recipient's permanent DH public key
         recipient_address: Address,
         message: &[u8],
         pow_difficulty: usize,
@@ -96,30 +88,45 @@ impl Packet {
     ) -> Self {
         info!("Creating signed and encrypted packet");
 
-        // **Compress the message before signing and encrypting**
+        // Compress the message
         let compression_level = 0; // Adjust as needed
         let compressed_message =
             encode_all(&message[..], compression_level).expect("Failed to compress message");
 
-        // Step 1: Sign the compressed message
+        // Sign the compressed message
         let signature = auth
             .sign_message(&compressed_message)
             .to_bytes()
             .to_vec();
 
-        // Step 2: Encrypt the compressed message
-        let (ciphertext, nonce) =
-            encryption.encrypt_message(recipient_public_key, &compressed_message);
+        // Create EncryptedPayload
+        let encrypted_payload = EncryptedPayload {
+            signature,
+            signing_public_key: auth.verifying_key().to_bytes(),
+            permanent_dh_public_key: *encryption.permanent_public_key.as_bytes(),
+            compressed_message,
+        };
 
-        // Step 3: Prepare the Packet data for PoW (excluding pow_nonce and pow_hash)
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        // Serialize EncryptedPayload
+        let encrypted_payload_bytes = bincode::serialize(&encrypted_payload)
+            .expect("Failed to serialize EncryptedPayload");
+
+        // Encrypt the serialized EncryptedPayload using ephemeral keys
+        let (ciphertext, nonce, ephemeral_dh_public_key_bytes) = encryption.encrypt_message(
+            recipient_public_dh_key,
+            &encrypted_payload_bytes,
+        );
+
+        // Prepare the Packet data
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         let mut packet = Packet {
-            signing_public_key: auth.verifying_key().to_bytes(),
-            dh_public_key: *encryption.our_public_key.as_bytes(),
+            ephemeral_dh_public_key: ephemeral_dh_public_key_bytes,
             nonce,
             ciphertext,
-            signature,
             pow_nonce: 0,
             pow_hash: Vec::new(),
             recipient_address,
@@ -128,11 +135,9 @@ impl Packet {
             argon2_params: argon2_params.clone(),
         };
 
+        // Perform PoW
         let packet_data = packet.serialize();
-
-        // Step 4: Perform PoW
         let argon2_params_native = argon2_params.to_argon2_params();
-
         let pow = PoW::new(
             &packet_data,
             pow_difficulty,
@@ -142,7 +147,7 @@ impl Packet {
 
         let (pow_hash, pow_nonce) = pow.calculate_pow();
 
-        // Step 5: Update Packet with PoW results
+        // Update Packet with PoW results
         packet.pow_nonce = pow_nonce;
         packet.pow_hash = pow_hash;
 
@@ -152,7 +157,6 @@ impl Packet {
     pub fn verify_and_decrypt(
         &self,
         encryption: &Encryption,
-        sender_public_key: &X25519PublicKey,
         pow_difficulty: usize,
     ) -> Option<Vec<u8>> {
         info!(
@@ -167,9 +171,7 @@ impl Packet {
         };
 
         let packet_data = packet_without_pow.serialize();
-
         let argon2_params_native = self.argon2_params.to_argon2_params();
-
         let pow = PoW::new(
             &packet_data,
             pow_difficulty,
@@ -182,25 +184,33 @@ impl Packet {
         }
 
         // Step 2: Decrypt the message
-        let decrypted_compressed_message =
-            encryption.decrypt_message(sender_public_key, &self.nonce, &self.ciphertext);
+        let sender_ephemeral_public_key = X25519PublicKey::from(self.ephemeral_dh_public_key);
+        let decrypted_payload_bytes = encryption.decrypt_message(
+            &sender_ephemeral_public_key,
+            &self.nonce,
+            &self.ciphertext,
+        );
 
-        // **Step 3: Verify the signature over the compressed message**
-        let verifying_key = VerifyingKey::from_bytes(&self.signing_public_key).ok()?;
+        // Step 3: Deserialize EncryptedPayload
+        let encrypted_payload: EncryptedPayload =
+            bincode::deserialize(&decrypted_payload_bytes).ok()?;
 
-        let signature_bytes: &[u8; 64] = self.signature.as_slice().try_into().ok()?;
+        // Step 4: Verify the signature over the compressed message
+        let verifying_key =
+            VerifyingKey::from_bytes(&encrypted_payload.signing_public_key).ok()?;
+        let signature_bytes: &[u8; 64] = encrypted_payload.signature.as_slice().try_into().ok()?;
         let signature = Signature::from_bytes(signature_bytes);
 
         if !Authentication::verify_message_with_key(
-            &decrypted_compressed_message,
+            &encrypted_payload.compressed_message,
             &signature,
             &verifying_key,
         ) {
             return None;
         }
 
-        // **Step 4: Decompress the decrypted message**
-        let decompressed_message = decode_all(&decrypted_compressed_message[..]).ok()?;
+        // Step 5: Decompress the message
+        let decompressed_message = decode_all(&encrypted_payload.compressed_message[..]).ok()?;
 
         Some(decompressed_message)
     }

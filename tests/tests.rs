@@ -26,13 +26,23 @@ mod tests {
         let encryption_b = Encryption::new();
 
         let message = b"Hello, world!";
-        let (ciphertext, nonce) =
-            encryption_a.encrypt_message(&encryption_b.our_public_key, message);
 
-        let plaintext =
-            encryption_b.decrypt_message(&encryption_a.our_public_key, &nonce, &ciphertext);
+        // Encryption A encrypts a message to Encryption B
+        let (ciphertext, nonce, ephemeral_public_key_bytes) =
+            encryption_a.encrypt_message(&encryption_b.permanent_public_key, message);
+
+        // Convert ephemeral public key bytes to X25519PublicKey
+        let ephemeral_public_key = X25519PublicKey::from(ephemeral_public_key_bytes);
+
+        // Encryption B decrypts the message using the sender's ephemeral public key
+        let plaintext = encryption_b.decrypt_message(
+            &ephemeral_public_key,
+            &nonce,
+            &ciphertext,
+        );
         assert_eq!(plaintext, message);
     }
+
 
     #[tokio::test]
     async fn test_signing_verification() {
@@ -75,7 +85,7 @@ mod tests {
         let recipient_address = {
             let mut hasher = Sha256::new();
             hasher.update(&auth_receiver.verifying_key().to_bytes());
-            hasher.update(enc_receiver.our_public_key.as_bytes());
+            hasher.update(enc_receiver.permanent_public_key.as_bytes());
             let result = hasher.finalize();
             let mut address = [0u8; ADDRESS_LENGTH];
             address.copy_from_slice(&result[..ADDRESS_LENGTH]);
@@ -92,7 +102,7 @@ mod tests {
         let packet = Packet::create_signed_encrypted(
             &auth_sender,
             &enc_sender,
-            &enc_receiver.our_public_key,
+            &enc_receiver.permanent_public_key,
             recipient_address, // Include recipient address
             message,
             pow_difficulty,
@@ -103,7 +113,6 @@ mod tests {
         // Receiver verifies and decrypts the packet
         let decrypted_message = packet.verify_and_decrypt(
             &enc_receiver,
-            &X25519PublicKey::from(packet.dh_public_key),
             pow_difficulty,
         );
 
@@ -151,7 +160,7 @@ mod tests {
 
         // Extract public keys before moving into clients
         let auth_b_verifying_key = auth_b.verifying_key();
-        let enc_b_public_key = enc_b.our_public_key;
+        let enc_b_public_key = enc_b.permanent_public_key;
 
         // Define Argon2id parameters
         let argon2_params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
@@ -270,7 +279,7 @@ mod tests {
     /// Returns the client instance along with references to its verifying key and DH public key.
     fn setup_client(auth: Authentication, enc: Encryption, node_address: SocketAddr) -> (Client, VerifyingKey, X25519PublicKey) {
         let verifying_key = auth.verifying_key();
-        let dh_public_key = enc.our_public_key;
+        let dh_public_key = enc.permanent_public_key;
         let client = Client::new(auth, enc, node_address);
         (client, verifying_key, dh_public_key)
     }

@@ -18,8 +18,7 @@ This implementation includes several planned features to enhance the functionali
 
 ### Planned Features (TODO)
 
-- **Subscription to Node**: Clients/Nodes should be able to subscribe to updates from the node for the node prefix
-- **Sender pub keys should be ephemeral**: But inside the decrypted message we should be able to verify that it came from a particular sender
+- **Subscription to Node**: Clients should be able to subscribe to updates from the node for the node prefix
 - **Timeouts**: Implement timeouts on read operations
 - **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
 - **Acknowledgment of Messages**: Implementing optional acknowledgments to ensure message delivery.

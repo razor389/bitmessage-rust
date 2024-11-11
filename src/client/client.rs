@@ -32,7 +32,7 @@ impl Client {
         // Compute the client's address
         let mut hasher = Sha256::new();
         hasher.update(&auth.verifying_key().to_bytes());
-        hasher.update(encryption.our_public_key.as_bytes());
+        hasher.update(encryption.permanent_public_key.as_bytes());
         let result = hasher.finalize();
         let mut address = [0u8; ADDRESS_LENGTH];
         address.copy_from_slice(&result[..ADDRESS_LENGTH]);
@@ -184,11 +184,9 @@ impl Client {
                                     "Client {:?} found packet addressed to self: {:?}",
                                     self.address, packet
                                 );
-                                let sender_public_key = X25519PublicKey::from(packet.dh_public_key);
-
+                                
                                 packet.verify_and_decrypt(
                                     &self.encryption,
-                                    &sender_public_key,
                                     pow_difficulty,
                                 )
                             } else {
