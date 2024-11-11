@@ -21,11 +21,9 @@ This implementation includes several planned features to enhance the functionali
 - **Subscription to Node**: Clients should be able to subscribe to updates from the node for the node prefix
 - **Timeouts**: Implement timeouts on read operations
 - **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
-- **Acknowledgment of Messages**: Implementing optional acknowledgments to ensure message delivery.
-- **Integration Testing**: Adequate tests for every function
 - **Weakness Analysis**: Identifying flaws in the protocol, including the potential for associating sender addresses with IPs.
 - **Group Messaging**: Bitmessage group messaging.
-- **TOR connectivity to nodes**: Nodes should optionally support connection via TOR. 
+- **TOR connectivity to nodes**: Nodes should optionally support connection via TOR.
 - **Node Prefix-Based Forwarding**: Propagating messages only to nodes with matching prefixes.
 - **Node Prefix Adjustments**: Dynamic prefix adjustments based on node traffic analysis and peer node visibility
 - **Node Traffic Analysis**: Helping nodes decide their optimal prefix level.
@@ -72,7 +70,7 @@ We are grateful to the developers of these libraries for their work, which has s
 
 ## Usage
 
-RustBitmessage can be used in either **node mode** or **client mode**. 
+RustBitmessage can be used in either **node mode** or **client mode**.
 
 ### Running as a Node
 
