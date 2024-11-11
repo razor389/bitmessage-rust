@@ -1,10 +1,10 @@
-# RustBitmessage
+# ShadowLink
 
 A Rust implementation of [PyBitmessage](https://github.com/Bitmessage/PyBitmessage) with security and efficiency improvements. This project also integrates suggestions from [A Very Technical Look at Bitmessage](https://zolagonano.github.io/blog/posts/a-very-technical-look-at-bitmessage) and aims to implement prefix filtering for enhanced scalability.
 
 ## Overview
 
-RustBitmessage is designed to be a more secure and efficient version of Bitmessage, a decentralized communication protocol known for its emphasis on privacy and resistance to surveillance. By reimagining the protocol in Rust, we leverage Rust’s safety guarantees and modern features to provide a robust implementation with enhanced performance.
+ShadowLink is designed to be a more secure and efficient version of Bitmessage, a decentralized communication protocol known for its emphasis on privacy and resistance to surveillance. By reimagining the protocol in Rust, we leverage Rust’s safety guarantees and modern features to provide a robust implementation with enhanced performance.
 
 ### Key Improvements
 
