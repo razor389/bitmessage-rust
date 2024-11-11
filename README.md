@@ -16,7 +16,7 @@ RustBitmessage is designed to be a more secure and efficient version of Bitmessa
 
 This implementation includes several planned features to enhance the functionality of Bitmessage.
 
-### Planned Features (TODO)
+### Planned Features
 
 - **Subscription to Node**: Clients should be able to subscribe to updates from the node for the node prefix
 - **Timeouts**: Implement timeouts on read operations
