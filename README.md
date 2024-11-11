@@ -21,7 +21,7 @@ This implementation includes several planned features to enhance the functionali
 - **Subscription to Node**: Clients should be able to subscribe to updates from the node for the node prefix
 - **Timeouts**: Implement timeouts on read operations
 - **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
-- **Group Messaging**: Bitmessage group messaging.
+- **Group Messaging**: ShadowLink group messaging protocol.
 - **TOR connectivity to nodes**: Nodes should optionally support connection via TOR.
 - **Node Prefix-Based Forwarding**: Propagating messages only to nodes with matching prefixes.
 - **Node Prefix Adjustments**: Dynamic prefix adjustments based on node traffic analysis and peer node visibility
@@ -29,11 +29,11 @@ This implementation includes several planned features to enhance the functionali
 
 ### Scalability and Filtering
 
-To support a growing network, we aim to integrate prefix filtering. This approach will allow nodes to reduce unnecessary message processing, making RustBitmessage scalable for larger networks.
+To support a growing network, we aim to integrate prefix filtering. This approach will allow nodes to reduce unnecessary message processing, making ShadowLink scalable for larger networks.
 
 ## Dependencies and Acknowledgments
 
-RustBitmessage relies on several external libraries for its functionality:
+ShadowLink relies on several external libraries for its functionality:
 
 - **[`rspow`](https://github.com/zolagonano/rspow)**: A Rust library for proof-of-work using Argon2id. We use `rspow` for implementing the proof-of-work mechanism in our protocol.
 - **[`rust-argon2`](https://github.com/sru-systems/rust-argon2)**: A Rust implementation of the Argon2 password hashing function. We use `rust-argon2` within `rspow` for the proof-of-work calculations.
@@ -51,7 +51,7 @@ We are grateful to the developers of these libraries for their work, which has s
 1. Clone this repository:
 
    ```bash
-   git clone https://github.com/razor389/bitmessage-rust.git
+   git clone https://github.com/razor389/shadow-link.git
    cd bitmessage-rust
    ```
 
@@ -69,11 +69,11 @@ We are grateful to the developers of these libraries for their work, which has s
 
 ## Usage
 
-RustBitmessage can be used in either **node mode** or **client mode**.
+ShadowLink can be used in either **node mode** or **client mode**.
 
 ### Running as a Node
 
-A **node** operates within the Bitmessage network, performing tasks such as connecting to peers, broadcasting messages, and forwarding messages.
+A **node** operates within the ShadowLink network, performing tasks such as connecting to peers, broadcasting messages, and forwarding messages.
 
 1. **Run the Node**: Use the `--node` flag along with the `--address` flag to specify the node’s IP and port, and the `--connect` flag to connect to other nodes.
 
@@ -81,7 +81,7 @@ A **node** operates within the Bitmessage network, performing tasks such as conn
    cargo run --release -- --node --address "127.0.0.1:12345" --connect "127.0.0.1:12346"
    ```
 
-   - **`--node`**: Starts the Bitmessage node.
+   - **`--node`**: Starts the ShadowLink node.
    - **`--address`**: Required. Specifies the node’s IP address and port.
    - **`--connect`**: Optional. Connects to one or more specified nodes. Add additional addresses with space-separated values.
 
@@ -89,7 +89,7 @@ A **node** operates within the Bitmessage network, performing tasks such as conn
 
 ### Running as a Client
 
-A **client** interacts with a Bitmessage node, sending and receiving messages.
+A **client** interacts with a ShadowLink node, sending and receiving messages.
 
 1. **Run the Client**: Use the `--client` flag along with the `--address` flag to specify the node address to connect to.
 
@@ -97,10 +97,10 @@ A **client** interacts with a Bitmessage node, sending and receiving messages.
    cargo run --release -- --client --address "127.0.0.1:12345"
    ```
 
-   - **`--client`**: Starts the Bitmessage client.
+   - **`--client`**: Starts the ShadowLink client.
    - **`--address`**: Required. Specifies the node’s IP address and port.
 
-2. **Sending Messages**: The client sends a message (for testing, it sends "Hello, Bitmessage!") to itself. This demonstrates basic message transmission.
+2. **Sending Messages**: The client sends a message (for testing, it sends "Hello, ShadowLink!") to itself. This demonstrates basic message transmission.
 
 3. **Receiving Messages**: The client listens for messages from the node, displaying any received messages in the console.
 

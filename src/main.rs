@@ -82,7 +82,7 @@ async fn main() {
         );
 
         // For demonstration, client sends a message to itself
-        let message = b"Hello, Bitmessage!";
+        let message = b"Hello, ShadowLink!";
         let pow_difficulty = 1;
         let ttl = 3600;
         let argon2_params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
