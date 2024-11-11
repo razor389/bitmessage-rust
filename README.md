@@ -21,7 +21,6 @@ This implementation includes several planned features to enhance the functionali
 - **Subscription to Node**: Clients should be able to subscribe to updates from the node for the node prefix
 - **Timeouts**: Implement timeouts on read operations
 - **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
-- **Weakness Analysis**: Identifying flaws in the protocol, including the potential for associating sender addresses with IPs.
 - **Group Messaging**: Bitmessage group messaging.
 - **TOR connectivity to nodes**: Nodes should optionally support connection via TOR.
 - **Node Prefix-Based Forwarding**: Propagating messages only to nodes with matching prefixes.
