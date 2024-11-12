@@ -18,12 +18,13 @@ This implementation includes several planned features to enhance the functionali
 
 ### Planned Features
 
-- **Subscription to Node**: Clients should be able to subscribe to updates from the node for the node prefix
+- **Node Selection**: Client should decide on a prefix length and find a matching node based on their keys.
+- **Unsubscribe**: Client should be able to unsubscribe from a node.
+- **Message Forwarding**: Other nodes with matching prefixes should get the message as well.
+- **Address Changes / Key Mgmt**: Clients should be able to notify contacts of an address change, alternatively we could implement key rotation.
 - **Timeouts**: Implement timeouts on read operations
-- **Network Connectivity**: Nodes should periodically ping one another in a lightweight way to stay active. Otherwise go into an inactive node list.
 - **Group Messaging**: ShadowLink group messaging protocol.
 - **TOR connectivity to nodes**: Nodes should optionally support connection via TOR.
-- **Node Prefix-Based Forwarding**: Propagating messages only to nodes with matching prefixes.
 - **Node Prefix Adjustments**: Dynamic prefix adjustments based on node traffic analysis and peer node visibility
 - **Node Traffic Analysis**: Helping nodes decide their optimal prefix level.
 

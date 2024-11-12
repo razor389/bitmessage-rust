@@ -4,24 +4,80 @@
 mod tests {
     use bitmessage_rust::authentication::Authentication;
     use bitmessage_rust::client::Client;
+    use bitmessage_rust::common::NodeInfo;
     use bitmessage_rust::encryption::Encryption;
     use bitmessage_rust::node::Node;
     use bitmessage_rust::packet::{Packet, ADDRESS_LENGTH};
     use bitmessage_rust::pow::{PoW, PoWAlgorithm};
     use bitmessage_rust::serializable_argon2_params::SerializableArgon2Params;
     use argon2::Params as Argon2Params;
-    use ed25519_dalek::VerifyingKey;
+    use ed25519_dalek::{SigningKey, VerifyingKey};
     use env_logger;
-    #[allow(unused_imports)]
-    use log::{info, debug, warn, error};
+    use rand_core::OsRng;
     use sha2::{Digest, Sha256};
-    use tokio::net::TcpListener;
     use x25519_dalek::PublicKey as X25519PublicKey;
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Helper function to initialize the logger once for all tests.
+    /// This avoids multiple initializations that can cause warnings.
+    fn init_logger() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
+    /// Helper function to generate a recipient address based on verifying key and encryption public key.
+    fn generate_recipient_address(verifying_key: &VerifyingKey, encryption_pub: &X25519PublicKey) -> [u8; ADDRESS_LENGTH] {
+        let mut hasher = Sha256::new();
+        hasher.update(verifying_key.to_bytes());
+        hasher.update(encryption_pub.as_bytes());
+        let result = hasher.finalize();
+        let mut address = [0u8; ADDRESS_LENGTH];
+        address.copy_from_slice(&result[..ADDRESS_LENGTH]);
+        address
+    }
+
+    /// Helper function to create a node and return its Arc<Node>
+    async fn create_node(
+        address: SocketAddr,
+        prefix_length: usize,
+        pow_difficulty: usize,
+        max_ttl: u64,
+        min_argon2_params: SerializableArgon2Params,
+        cleanup_interval: Duration, // New parameter
+        blacklist_duration: Duration,
+    ) -> Arc<Node> {
+        // Generate signing and verifying keys
+        let mut csprng = OsRng {};
+        let signing_key = SigningKey::generate(&mut csprng);
+        let verifying_key: VerifyingKey = signing_key.verifying_key();
+        let public_key_bytes = verifying_key.to_bytes();
+
+        // Create the node with configurable blacklist_duration
+        let node = Node::new(
+            &public_key_bytes,
+            address,
+            prefix_length,
+            pow_difficulty,
+            max_ttl,
+            min_argon2_params,
+            cleanup_interval, 
+            blacklist_duration,
+        )
+        .await;
+
+        node
+    }
+
+    /// Helper function to wait for a short duration to allow asynchronous tasks to complete
+    async fn wait_short() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     #[tokio::test]
     async fn test_encryption_decryption() {
+        init_logger();
+
         let encryption_a = Encryption::new();
         let encryption_b = Encryption::new();
 
@@ -46,6 +102,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_signing_verification() {
+        init_logger();
+
         let auth_a = Authentication::new();
         let auth_b = Authentication::new();
 
@@ -72,6 +130,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_signed_encrypted_message() {
+        init_logger();
+
         let auth_sender = Authentication::new();
         let enc_sender = Encryption::new();
         let auth_receiver = Authentication::new();
@@ -82,15 +142,7 @@ mod tests {
         let pow_difficulty = 1; // Adjust difficulty for testing purposes
 
         // Compute the recipient's address
-        let recipient_address = {
-            let mut hasher = Sha256::new();
-            hasher.update(&auth_receiver.verifying_key().to_bytes());
-            hasher.update(enc_receiver.permanent_public_key.as_bytes());
-            let result = hasher.finalize();
-            let mut address = [0u8; ADDRESS_LENGTH];
-            address.copy_from_slice(&result[..ADDRESS_LENGTH]);
-            address
-        };
+        let recipient_address = generate_recipient_address(&auth_receiver.verifying_key(), &enc_receiver.permanent_public_key);
 
         let ttl = 60; // Arbitrary TTL for testing
 
@@ -143,486 +195,627 @@ mod tests {
         assert!(pow.verify_pow(&hash, nonce));
     }
 
+
+    /// Test client-node connection and subscription
     #[tokio::test]
-    async fn test_client_node_communication() {
-        use bitmessage_rust::client::Client;
-        use bitmessage_rust::node::Node;
+    async fn test_client_node_connection() {
+        init_logger();
 
-        // Initialize the logger
-        let _ = env_logger::builder().is_test(true).try_init();
+        // Initialize node parameters with prefix_length = 0 and short blacklist_duration
+        let address: SocketAddr = "127.0.0.1:9000".parse().unwrap();
+        let prefix_length = 0; // Store all packets
+        let pow_difficulty = 1000;
+        let max_ttl = 60; // 1 minute
+        let min_argon2_params = SerializableArgon2Params {
+            m_cost: 4096,
+            t_cost: 3,
+            p_cost: 1,
+            output_length: Some(32),
+        };
+        let cleanup_interval = Duration::from_secs(5); // Short duration for testing
+        let blacklist_duration = Duration::from_secs(15);
+        // Create node
+        let _node = create_node(address, prefix_length, pow_difficulty, max_ttl, min_argon2_params, cleanup_interval, blacklist_duration).await;
 
-        // Initialize clients' authentication and encryption
-        let auth_a = Authentication::new();
-        let enc_a = Encryption::new();
+        // Create client
+        let auth = Authentication::new();
+        let encryption = Encryption::new();
+        let client = Client::new(auth, encryption, address);
+        let client = Arc::new(client);
 
-        let auth_b = Authentication::new();
-        let enc_b = Encryption::new();
+        // Allow some time for the node to start listening
+        wait_short().await;
 
-        // Extract public keys before moving into clients
-        let auth_b_verifying_key = auth_b.verifying_key();
-        let enc_b_public_key = enc_b.permanent_public_key;
-
-        // Define Argon2id parameters
-        let argon2_params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
-        let serializable_params = SerializableArgon2Params::from_argon2_params(&argon2_params);
-
-        // Define node's minimum acceptable parameters
-        let min_argon2_params = serializable_params.clone();
-
-        // Set up addresses for nodes (use loopback addresses with different ports)
-        let address_a: SocketAddr = "127.0.0.1:6000".parse().unwrap();
-        let address_b: SocketAddr = "127.0.0.1:6001".parse().unwrap();
-
-        // Create nodes with unique IDs and PoW difficulty
-        let node_a = Node::new(
-            1,
-            vec![],
-            1,
-            3600,
-            min_argon2_params.clone(),
-            address_a,
-        ).await;
-
-        let node_b = Node::new(
-            2,
-            vec![],
-            1,
-            3600,
-            min_argon2_params.clone(),
-            address_b,
-        ).await;
-
-        // Start nodes
-        node_a.start_gossip();
-        node_b.start_gossip();
-
-        // Node A connects to Node B
-        node_a.connect_sender.send(address_b).await.unwrap();
-
-        // Node B connects to Node A
-        node_b.connect_sender.send(address_a).await.unwrap();
-
-        // Spawn tasks to run the nodes
-        let node_a_clone = Arc::clone(&node_a);
-        tokio::spawn(async move {
-            if let Err(e) = node_a_clone.run().await {
-                error!("Node A failed: {:?}", e);
-            }
+        // Subscribe to node, clone the Arc to pass to the subscription task
+        let client_sub = client.clone();
+        let subscribe_handle = tokio::spawn(async move {
+            client_sub.subscribe_and_receive_messages(pow_difficulty).await;
         });
 
-        let node_b_clone = Arc::clone(&node_b);
-        tokio::spawn(async move {
-            if let Err(e) = node_b_clone.run().await {
-                error!("Node B failed: {:?}", e);
-            }
-        });
+        // Allow subscription to process
+        wait_short().await;
 
-        // Allow some time for nodes to start and connect
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        // Since we haven't sent any messages yet, the subscriber should receive no messages
+        // You can enhance this by capturing logs or adding additional instrumentation
+        // For now, we'll just ensure that the subscription doesn't panic
 
-        // Create clients connected to their respective nodes
-        let client_a = Client::new(auth_a, enc_a, address_a);
-        let client_b = Client::new(auth_b, enc_b, address_b);
-
-        // Client A sends a message to Client B
-        let message = b"Hello, Client B!";
-
-        let ttl = 3600; // TTL of 1 hour
-
-        client_a.send_message(
-            &auth_b_verifying_key,    // Recipient's verifying key
-            &enc_b_public_key,        // Recipient's DH public key
-            message,
-            1,                             // PoW difficulty
-            ttl,                           // Include ttl
-            serializable_params.clone(),   // Pass the SerializableArgon2Params
-        ).await;
-
-        // Allow some time for the message to propagate
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-        // Client B retrieves messages
-        let received_messages = client_b.receive_messages(1).await;
-
-        // Verify that Client B received and decrypted the message from Client A
-        assert_eq!(received_messages.len(), 1);
-        assert_eq!(received_messages[0].as_slice(), message);
+        // Clean up: cancel the subscription task
+        subscribe_handle.abort();
     }
 
-    /// Sets up a node with a unique ID and dynamically assigned port.
-    /// Returns the node instance and its assigned socket address.
-    async fn setup_node(id: usize) -> (Arc<Node>, SocketAddr) {
-        // Bind to port 0 to let the OS assign an available port
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        
-        let pow_difficulty = 1;
-        let max_ttl = 3600;
-        let argon2_params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
-        let serializable_params = SerializableArgon2Params::from_argon2_params(&argon2_params);
-        let prefix = vec![];
-
-        // Initialize the node
-        let node = Node::new(
-            id,
-            prefix,
-            pow_difficulty,
-            max_ttl,
-            serializable_params,
-            address,
-        ).await;
-
-        (node, address)
-    }
-
-    /// Sets up a client connected to a specific node address.
-    /// Returns the client instance along with references to its verifying key and DH public key.
-    fn setup_client(auth: Authentication, enc: Encryption, node_address: SocketAddr) -> (Client, VerifyingKey, X25519PublicKey) {
-        let verifying_key = auth.verifying_key();
-        let dh_public_key = enc.permanent_public_key;
-        let client = Client::new(auth, enc, node_address);
-        (client, verifying_key, dh_public_key)
-    }
-
+    /// Test message forwarding between nodes
     #[tokio::test]
     async fn test_message_forwarding() {
+        init_logger();
 
-        // Initialize the logger
-        let _ = env_logger::builder().is_test(true).try_init();
+        // Initialize node A with prefix_length = 16 and short blacklist_duration
+        let address_a: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let prefix_length_a = 16; // Store only packets matching the first 16 bits
+        let pow_difficulty_a = 1;
+        let max_ttl_a = 120; // 2 minutes
+        let min_argon2_params_a = SerializableArgon2Params {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+            output_length: Some(32),
+        };
+        let cleanup_interval_a = Duration::from_secs(5); // Short interval for testing
+        let blacklist_duration_a = Duration::from_secs(5); // Short blacklist duration for testing
+        let node_a = create_node(
+            address_a,
+            prefix_length_a,
+            pow_difficulty_a,
+            max_ttl_a,
+            min_argon2_params_a,
+            cleanup_interval_a,
+            blacklist_duration_a,
+        )
+        .await;
 
-        // Initialize authentication and encryption for clients
-        let auth_a = Authentication::new();
-        let enc_a = Encryption::new();
+        // Initialize node B with prefix_length = 0 and short blacklist_duration
+        let address_b: SocketAddr = "127.0.0.1:9002".parse().unwrap();
+        let prefix_length_b = 0; // Store all packets
+        let pow_difficulty_b = 1;
+        let max_ttl_b = 120; // 2 minutes
+        let min_argon2_params_b = SerializableArgon2Params {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+            output_length: Some(32),
+        };
+        let cleanup_interval_b = Duration::from_secs(5); // Short interval for testing
+        let blacklist_duration_b = Duration::from_secs(5); // Short blacklist duration for testing
+        let node_b = create_node(
+            address_b,
+            prefix_length_b,
+            pow_difficulty_b,
+            max_ttl_b,
+            min_argon2_params_b,
+            cleanup_interval_b,
+            blacklist_duration_b,
+        )
+        .await;
 
-        let _auth_b = Authentication::new();
-        let _enc_b = Encryption::new();
+        // Allow nodes to start
+        wait_short().await;
 
-        let auth_c = Authentication::new();
-        let enc_c = Encryption::new();
+        // Connect node A to node B
+        node_a
+            .update_routing_table(NodeInfo {
+                id: node_b.id,
+                address: address_b,
+            })
+            .await;
+
+        // Create client connected to node A
+        let auth = Authentication::new();
+        let encryption = Encryption::new();
+        let client = Client::new(auth, encryption, address_a);
+        let client = Arc::new(client);
+
+        // Allow some time for the routing table update
+        wait_short().await;
+
+        // Create a message to send from client to node B via node A
+        let message = b"Forward this message to node B";
+        let _recipient_address = generate_recipient_address(&client.auth.verifying_key(), &client.encryption.permanent_public_key);
+
+        let pow_difficulty = pow_difficulty_a;
+        let ttl = 60; // 1 minute
 
         // Define Argon2id parameters
         let argon2_params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
         let serializable_params = SerializableArgon2Params::from_argon2_params(&argon2_params);
 
-        // Define nodes' minimum acceptable parameters
-        let _min_argon2_params = serializable_params.clone();
+        // Create a subscription client to node B
+        let auth_sub = Authentication::new();
+        let encryption_sub = Encryption::new();
+        let client_sub = Client::new(auth_sub, encryption_sub, address_b);
+        let client_sub = Arc::new(client_sub);
 
-        // Set up nodes with unique IDs and dynamic ports
-        let (node_a, address_a) = setup_node(1).await;
-        let (node_b, address_b) = setup_node(2).await;
-        let (node_c, address_c) = setup_node(3).await;
-
-        // Start gossip protocols
-        node_a.start_gossip();
-        node_b.start_gossip();
-        node_c.start_gossip();
-
-        // Establish connections: Node A <-> Node B <-> Node C
-        node_a.connect_sender.send(address_b).await.unwrap();
-        node_b.connect_sender.send(address_c).await.unwrap();
-
-        // Spawn tasks to run the nodes
-        let node_a_clone = Arc::clone(&node_a);
-        tokio::spawn(async move {
-            if let Err(e) = node_a_clone.run().await {
-                error!("Node A failed: {:?}", e);
-            }
+        // Spawn the subscription client
+        let client_sub_clone = client_sub.clone();
+        let subscribe_handle = tokio::spawn(async move {
+            client_sub_clone.subscribe_and_receive_messages(pow_difficulty_b).await;
         });
 
-        let node_b_clone = Arc::clone(&node_b);
-        tokio::spawn(async move {
-            if let Err(e) = node_b_clone.run().await {
-                error!("Node B failed: {:?}", e);
-            }
-        });
+        // Send message from client to node A
+        client
+            .send_message(
+                &client_sub.auth.verifying_key(),
 
-        let node_c_clone = Arc::clone(&node_c);
-        tokio::spawn(async move {
-            if let Err(e) = node_c_clone.run().await {
-                error!("Node C failed: {:?}", e);
-            }
-        });
+                &client_sub.encryption.permanent_public_key,
+                message,
+                pow_difficulty,
+                ttl,
+                serializable_params.clone(),
+            )
+            .await;
 
-        // Allow some time for nodes to start and establish connections
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // Allow time for message forwarding
+        tokio::time::sleep(Duration::from_millis(500)).await; // Increased wait time
 
-        // Create clients connected to their respective nodes, extracting necessary keys
-        let (client_a, _verifying_key_a, _dh_pub_key_a) = setup_client(auth_a, enc_a, address_a);
-        let (client_c, verifying_key_c, dh_pub_key_c) = setup_client(auth_c, enc_c, address_c);
+        // Receive the packet via client_sub
+        if let Some(received_packet) = client_sub.receive_packet().await {
+            // Decrypt the packet
+            let decrypted_message = received_packet
+                .verify_and_decrypt(&client_sub.encryption, pow_difficulty_b)
+                .expect("Failed to decrypt received packet");
 
-        // Client A sends a message to Client C
-        let message = b"Hello, Client C! Through Node B.";
-        let ttl = 3600; // TTL of 1 hour
+            // Compare decrypted message with original message
+            assert_eq!(
+                decrypted_message.as_slice(),
+                message,
+                "Decrypted message does not match original message"
+            );
+        } else {
+            panic!("Did not receive forwarded packet on Node B");
+        }
 
-        client_a.send_message(
-            &verifying_key_c,            // Recipient's verifying key
-            &dh_pub_key_c,               // Recipient's DH public key
-            message,
-            1,                           // PoW difficulty
-            ttl,                         // TTL
-            serializable_params.clone(), // Serializable Argon2id params
-        ).await;
-
-        // Allow some time for the message to propagate through nodes
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-        // Client C retrieves messages
-        let received_messages = client_c.receive_messages(1).await;
-
-        // Verify that Client C received and decrypted the message from Client A
-        assert_eq!(received_messages.len(), 1);
-        assert_eq!(received_messages[0].as_slice(), message);
+        // Clean up: cancel the subscription task
+        subscribe_handle.abort();
     }
 
+    /// Test TTL message expiration
     #[tokio::test]
-    async fn test_blacklisting_nodes() {
+    async fn test_ttl_message_expiration() {
+        init_logger();
 
-        // Initialize the logger
-        let _ = env_logger::builder().is_test(true).try_init();
+        // Initialize node with prefix_length = 0 and short blacklist_duration
+        let address: SocketAddr = "127.0.0.1:9003".parse().unwrap();
+        let prefix_length = 0; // Store all packets
+        let pow_difficulty = 1;
+        let max_ttl = 5; // 5 seconds for quick testing
+        let min_argon2_params = SerializableArgon2Params {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+            output_length: Some(32),
+        };
+        let cleanup_interval =Duration::from_secs(5); // Short duration for testing
+        let blacklist_duration = Duration::from_secs(5); // Short duration for testing
+        let node = create_node(address, prefix_length, pow_difficulty, max_ttl, min_argon2_params, cleanup_interval,blacklist_duration).await;
 
-        // Initialize authentication and encryption for clients
-        let auth_a = Authentication::new();
-        let enc_a = Encryption::new();
+        // Create client
+        let auth = Authentication::new();
+        let encryption = Encryption::new();
+        let client = Client::new(auth, encryption, address);
+        let client = Arc::new(client);
 
-        let auth_b = Authentication::new();
-        let enc_b = Encryption::new();
+        // Allow node to start
+        wait_short().await;
+
+        // Subscribe to node
+        let client_sub = client.clone();
+        let client_sub_verifying_key = &client_sub.auth.verifying_key().clone();
+        let client_sub_pub_key = &client_sub.encryption.permanent_public_key.clone();
+        let subscribe_handle = tokio::spawn(async move {
+            client_sub.subscribe_and_receive_messages(pow_difficulty).await;
+        });
+
+        // Allow subscription to process
+        wait_short().await;
+
+        // Create a message
+        let message = b"This message will expire";
+        let _recipient_address = generate_recipient_address(&client.auth.verifying_key(), &client.encryption.permanent_public_key);
+
+        let ttl = 5; // 5 seconds
 
         // Define Argon2id parameters
         let argon2_params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
         let serializable_params = SerializableArgon2Params::from_argon2_params(&argon2_params);
 
-        // Define node's minimum acceptable parameters
-        let _min_argon2_params = serializable_params.clone();
+        // Send message
+        client
+            .send_message(
+                client_sub_verifying_key,
+                client_sub_pub_key,
+                message,
+                pow_difficulty,
+                ttl,
+                serializable_params.clone(),
+            )
+            .await;
 
-        // Set up nodes with unique IDs and dynamic ports
-        let (node_a, address_a) = setup_node(1).await;
-        let (node_b, address_b) = setup_node(2).await;
+        // Allow time for message to be processed
+        wait_short().await;
 
-        // Start gossip protocols
-        node_a.start_gossip();
-        node_b.start_gossip();
+        // Verify message is stored
+        {
+            let store = node.packet_store.lock().await;
+            assert_eq!(store.len(), 1);
+        }
 
-        // Establish bidirectional connections: Node A <-> Node B
-        node_a.connect_sender.send(address_b).await.unwrap();
-        node_b.connect_sender.send(address_a).await.unwrap();
+        // Wait for TTL to expire
+        tokio::time::sleep(Duration::from_secs(6)).await;
 
-        // Spawn tasks to run the nodes
-        let node_a_clone = Arc::clone(&node_a);
-        tokio::spawn(async move {
-            if let Err(e) = node_a_clone.run().await {
-                error!("Node A failed: {:?}", e);
-            }
-        });
+        // Allow cleanup task to run
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let node_b_clone = Arc::clone(&node_b);
-        tokio::spawn(async move {
-            if let Err(e) = node_b_clone.run().await {
-                error!("Node B failed: {:?}", e);
-            }
-        });
+        // Verify that the packet has been removed
+        {
+            let store = node.packet_store.lock().await;
+            assert_eq!(store.len(), 0);
+        }
 
-        // Allow some time for nodes to start and establish connections
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-        // Create clients connected to their respective nodes, extracting necessary keys
-        let (client_a, _verifying_key_a, _dh_pub_key_a) = setup_client(auth_a, enc_a, address_a);
-        let (client_b, verifying_key_b, dh_pub_key_b) = setup_client(auth_b, enc_b, address_b);
-
-        // Blacklist Node B in Node A
-        node_a.blacklist_ip(address_b).await;
-
-        // Allow some time for the blacklist to take effect
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        // Attempt to send a message from Client A to Client B
-        let message = b"Hello, Client B! This message should not be delivered.";
-        let ttl = 3600; // TTL of 1 hour
-
-        client_a.send_message(
-            &verifying_key_b,             // Recipient's verifying key
-            &dh_pub_key_b,                // Recipient's DH public key
-            message,
-            1,                            // PoW difficulty
-            ttl,                          // TTL
-            serializable_params.clone(),  // Serializable Argon2id params
-        ).await;
-
-        // Allow some time for the message to attempt propagation
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-        // Client B retrieves messages
-        let received_messages = client_b.receive_messages(1).await;
-
-        // Verify that Client B did NOT receive the message from Client A
-        assert_eq!(received_messages.len(), 0);
+        // Clean up: cancel the subscription task
+        subscribe_handle.abort();
     }
 
-
+    /// Test Argon2 and TTL validation
     #[tokio::test]
-    async fn test_message_ttl_expiration() {
+    async fn test_argon2_and_ttl_validation() {
+        init_logger();
 
-        // Initialize the logger
-        let _ = env_logger::builder().is_test(true).try_init();
+        // Initialize node with prefix_length = 0 and short blacklist_duration
+        let address: SocketAddr = "127.0.0.1:9004".parse().unwrap();
+        let prefix_length = 0; // Store all packets
+        let pow_difficulty = 1;
+        let max_ttl = 60; // 1 minute
+        let min_argon2_params = SerializableArgon2Params {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+            output_length: Some(32),
+        };
+        let cleanup_interval = Duration::from_secs(5);
+        let blacklist_duration = Duration::from_secs(5); // Short duration for testing
+        let node = create_node(address, prefix_length, pow_difficulty, max_ttl, min_argon2_params.clone(), cleanup_interval, blacklist_duration).await;
 
-        // Initialize authentication and encryption for clients
-        let auth_a = Authentication::new();
-        let enc_a = Encryption::new();
+        // Create client
+        let auth = Authentication::new();
+        let encryption = Encryption::new();
+        let client = Client::new(auth, encryption, address);
+        let client = Arc::new(client);
 
-        let auth_b = Authentication::new();
-        let enc_b = Encryption::new();
+        // Allow node to start
+        wait_short().await;
 
-        // Define Argon2id parameters
-        let argon2_params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
-        let serializable_params = SerializableArgon2Params::from_argon2_params(&argon2_params);
-
-        // Define node's minimum acceptable parameters
-        let _min_argon2_params = serializable_params.clone();
-
-        // Set up nodes with unique IDs and dynamic ports
-        let (node_a, address_a) = setup_node(1).await;
-        let (node_b, address_b) = setup_node(2).await;
-
-        // Start gossip protocols
-        node_a.start_gossip();
-        node_b.start_gossip();
-
-        // Establish bidirectional connections: Node A <-> Node B
-        node_a.connect_sender.send(address_b).await.unwrap();
-        node_b.connect_sender.send(address_a).await.unwrap();
-
-        // Spawn tasks to run the nodes
-        let node_a_clone = Arc::clone(&node_a);
-        tokio::spawn(async move {
-            if let Err(e) = node_a_clone.run().await {
-                error!("Node A failed: {:?}", e);
-            }
+        // Subscribe to node
+        let client_sub = client.clone();
+        let subscribe_handle = tokio::spawn(async move {
+            client_sub.subscribe_and_receive_messages(pow_difficulty).await;
         });
 
-        let node_b_clone = Arc::clone(&node_b);
-        tokio::spawn(async move {
-            if let Err(e) = node_b_clone.run().await {
-                error!("Node B failed: {:?}", e);
-            }
-        });
+        // Allow subscription to process
+        wait_short().await;
 
-        // Allow some time for nodes to start and establish connections
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // Case 1: Valid packet
+        let message_valid = b"Valid packet message";
+        let _recipient_address_valid = generate_recipient_address(&client.auth.verifying_key(), &client.encryption.permanent_public_key);
 
-        // Create clients connected to their respective nodes, extracting necessary keys
-        let (client_a, _verifying_key_a, _dh_pub_key_a) = setup_client(auth_a, enc_a, address_a);
-        let (client_b, verifying_key_b, dh_pub_key_b) = setup_client(auth_b, enc_b, address_b);
+        let pow_difficulty_valid = pow_difficulty;
+        let ttl_valid = 60; // Within max_ttl
 
-        // Client A sends a message to Client B with a short TTL
-        let message = b"Hello, Client B! This message will expire.";
-        let ttl = 2; // TTL of 2 seconds
+        let argon2_params_valid = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
+        let serializable_params_valid = SerializableArgon2Params::from_argon2_params(&argon2_params_valid);
 
-        client_a.send_message(
-            &verifying_key_b,             // Recipient's verifying key
-            &dh_pub_key_b,                // Recipient's DH public key
-            message,
-            1,                            // PoW difficulty
-            ttl,                          // TTL
-            serializable_params.clone(),  // Serializable Argon2id params
-        ).await;
+        client
+            .send_message(
+                &client.auth.verifying_key(),
+                &client.encryption.permanent_public_key,
+                message_valid,
+                pow_difficulty_valid,
+                ttl_valid,
+                serializable_params_valid.clone(),
+            )
+            .await;
 
-        // Allow time for the message to propagate and expire
-        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        // Allow time for message to be processed
+        wait_short().await;
 
-        // Client B retrieves messages
-        let received_messages = client_b.receive_messages(1).await;
+        // Verify packet is stored
+        {
+            let store = node.packet_store.lock().await;
+            assert_eq!(store.len(), 1);
+        }
 
-        // Verify that Client B did NOT receive the expired message
-        assert_eq!(received_messages.len(), 0);
+        // Case 2: Packet with ttl exceeding max_ttl
+        let message_invalid_ttl = b"Invalid TTL packet";
+        let _recipient_address_invalid_ttl = generate_recipient_address(&client.auth.verifying_key(), &client.encryption.permanent_public_key);
+
+        let pow_difficulty_invalid_ttl = pow_difficulty;
+        let ttl_invalid = max_ttl + 10; // Exceeds max_ttl
+
+        let argon2_params_invalid_ttl = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
+        let serializable_params_invalid_ttl = SerializableArgon2Params::from_argon2_params(&argon2_params_invalid_ttl);
+
+        client
+            .send_message(
+                &client.auth.verifying_key(),
+                &client.encryption.permanent_public_key,
+                message_invalid_ttl,
+                pow_difficulty_invalid_ttl,
+                ttl_invalid,
+                serializable_params_invalid_ttl.clone(),
+            )
+            .await;
+
+        // Allow time for message to be processed
+        wait_short().await;
+
+        // Verify packet is not stored and sender is blacklisted
+        {
+            let store = node.packet_store.lock().await;
+            assert_eq!(store.len(), 1); // Only the valid packet is stored
+
+            let blacklist = node.blacklist.lock().await;
+            assert!(blacklist.contains_key(&address.ip()));
+        }
+
+        // Case 3: Packet with insufficient Argon2 parameters
+        let message_invalid_argon2 = b"Invalid Argon2 parameters";
+        let _recipient_address_invalid_argon2 = generate_recipient_address(&client.auth.verifying_key(), &client.encryption.permanent_public_key);
+
+        let pow_difficulty_invalid_argon2 = pow_difficulty;
+        let ttl_invalid_argon2 = 60; // Within max_ttl
+
+        let argon2_params_invalid = Argon2Params::new(512, 1, 1, Some(16)).unwrap(); // Below min_argon2_params
+        let serializable_params_invalid = SerializableArgon2Params::from_argon2_params(&argon2_params_invalid);
+
+        client
+            .send_message(
+                &client.auth.verifying_key(),
+                &client.encryption.permanent_public_key,
+                message_invalid_argon2,
+                pow_difficulty_invalid_argon2,
+                ttl_invalid_argon2,
+                serializable_params_invalid.clone(),
+            )
+            .await;
+
+        // Allow time for message to be processed
+        wait_short().await;
+
+        // Verify packet is not stored and sender is blacklisted
+        {
+            let store = node.packet_store.lock().await;
+            assert_eq!(store.len(), 1); // Only the valid packet is stored
+
+            let blacklist = node.blacklist.lock().await;
+            assert!(blacklist.contains_key(&address.ip()));
+        }
+
+        // Clean up: cancel the subscription task
+        subscribe_handle.abort();
     }
 
-
+    /// Test blacklisting functionality
     #[tokio::test]
-    async fn test_duplicate_message_prevention() {
+    async fn test_blacklisting() {
+        init_logger();
 
-        // Initialize the logger
-        let _ = env_logger::builder().is_test(true).try_init();
+        // Initialize node with prefix_length = 0 and short blacklist_duration
+        let address: SocketAddr = "127.0.0.1:9005".parse().unwrap();
+        let prefix_length = 0; // Store all packets
+        let pow_difficulty = 1;
+        let max_ttl = 60; // 1 minute
+        let min_argon2_params = SerializableArgon2Params {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+            output_length: Some(32),
+        };
+        let cleanup_interval = Duration::from_secs(60);
+        let blacklist_duration = Duration::from_secs(5); // Short duration for testing
+        let node = create_node(address, prefix_length, pow_difficulty, max_ttl, min_argon2_params.clone(), cleanup_interval,blacklist_duration).await;
 
-        // Initialize authentication and encryption for clients
-        let auth_a = Authentication::new();
-        let enc_a = Encryption::new();
+        // Create client
+        let auth = Authentication::new();
+        let encryption = Encryption::new();
+        let client = Client::new(auth, encryption, address);
+        let client = Arc::new(client);
 
-        let auth_b = Authentication::new();
-        let enc_b = Encryption::new();
+        // Allow node to start
+        wait_short().await;
 
-        // Define Argon2id parameters
-        let argon2_params = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
-        let serializable_params = SerializableArgon2Params::from_argon2_params(&argon2_params);
-
-        // Define node's minimum acceptable parameters
-        let _min_argon2_params = serializable_params.clone();
-
-        // Set up nodes with unique IDs and dynamic ports
-        let (node_a, address_a) = setup_node(1).await;
-        let (node_b, address_b) = setup_node(2).await;
-
-        // Start gossip protocols
-        node_a.start_gossip();
-        node_b.start_gossip();
-
-        // Establish bidirectional connections: Node A <-> Node B
-        node_a.connect_sender.send(address_b).await.unwrap();
-        node_b.connect_sender.send(address_a).await.unwrap();
-
-        // Spawn tasks to run the nodes
-        let node_a_clone = Arc::clone(&node_a);
-        tokio::spawn(async move {
-            if let Err(e) = node_a_clone.run().await {
-                error!("Node A failed: {:?}", e);
-            }
+        // Subscribe to node
+        let client_sub = client.clone();
+        let client_sub_ver_key = &client_sub.auth.verifying_key().clone();
+        let client_sub_pub_key = &client_sub.encryption.permanent_public_key.clone();
+        let subscribe_handle = tokio::spawn(async move {
+            client_sub.subscribe_and_receive_messages(pow_difficulty).await;
         });
 
-        let node_b_clone = Arc::clone(&node_b);
-        tokio::spawn(async move {
-            if let Err(e) = node_b_clone.run().await {
-                error!("Node B failed: {:?}", e);
-            }
-        });
+        // Allow subscription to process
+        wait_short().await;
 
-        // Allow some time for nodes to start and establish connections
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // Attempt to send an invalid packet (exceeds TTL)
+        let message_invalid_ttl = b"Invalid TTL packet for blacklisting test";
+        let _recipient_address_invalid_ttl = generate_recipient_address(&client.auth.verifying_key(), &client.encryption.permanent_public_key);
 
-        // Create clients connected to their respective nodes, extracting necessary keys
-        let (client_a, _verifying_key_a, _dh_pub_key_a) = setup_client(auth_a, enc_a, address_a);
-        let (client_b, verifying_key_b, dh_pub_key_b) = setup_client(auth_b, enc_b, address_b);
+        let pow_difficulty_invalid_ttl = pow_difficulty;
+        let ttl_invalid = max_ttl + 10; // Exceeds max_ttl
 
-        // Client A sends a message to Client B
-        let message = b"Hello, Client B! This message will be duplicated.";
-        let ttl = 3600; // TTL of 1 hour
+        let argon2_params_invalid_ttl = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
+        let serializable_params_invalid_ttl = SerializableArgon2Params::from_argon2_params(&argon2_params_invalid_ttl);
 
-        client_a.send_message(
-            &verifying_key_b,             // Recipient's verifying key
-            &dh_pub_key_b,                // Recipient's DH public key
-            message,
-            1,                            // PoW difficulty
-            ttl,                          // TTL
-            serializable_params.clone(),  // Serializable Argon2id params
-        ).await;
+        client
+            .send_message(
+                client_sub_ver_key,
+                client_sub_pub_key,
+                message_invalid_ttl,
+                pow_difficulty_invalid_ttl,
+                ttl_invalid,
+                serializable_params_invalid_ttl.clone(),
+            )
+            .await;
 
-        // Attempt to send the same message again (duplicate)
-        client_a.send_message(
-            &verifying_key_b,             // Recipient's verifying key
-            &dh_pub_key_b,                // Recipient's DH public key
-            message,
-            1,                            // PoW difficulty
-            ttl,                          // TTL
-            serializable_params.clone(),  // Serializable Argon2id params
-        ).await;
+        // Allow time for message to be processed and blacklisting
+        wait_short().await;
 
-        // Allow some time for the messages to propagate
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // Verify that the sender is blacklisted
+        {
+            let blacklist = node.blacklist.lock().await;
+            assert!(blacklist.contains_key(&address.ip()));
+        }
 
-        // Client B retrieves messages
-        let received_messages = client_b.receive_messages(1).await;
+        // Attempt to send another valid packet from the same client, which should be rejected due to blacklisting
+        let message_valid = b"Valid message after blacklisting";
+        let _recipient_address_valid = generate_recipient_address(&client.auth.verifying_key(), &client.encryption.permanent_public_key);
 
-        // Verify that Client B received only one instance of the message
-        assert_eq!(received_messages.len(), 1);
-        assert_eq!(received_messages[0].as_slice(), message);
+        let pow_difficulty_valid = pow_difficulty;
+        let ttl_valid = 60; // Within max_ttl
+
+        let argon2_params_valid = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
+        let serializable_params_valid = SerializableArgon2Params::from_argon2_params(&argon2_params_valid);
+
+        client
+            .send_message(
+                client_sub_ver_key,
+                client_sub_pub_key,
+                message_valid,
+                pow_difficulty_valid,
+                ttl_valid,
+                serializable_params_valid.clone(),
+            )
+            .await;
+
+        // Allow time for message to be processed
+        wait_short().await;
+
+        // Verify that the new packet is not stored
+        {
+            let store = node.packet_store.lock().await;
+            assert_eq!(store.len(), 0); // No packets should be stored
+        }
+
+        // Clean up: cancel the subscription task
+        subscribe_handle.abort();
     }
 
+    /// Test blacklist expiration functionality
+    #[tokio::test]
+    async fn test_blacklist_expiration() {
+        init_logger();
+
+        // Initialize node with prefix_length = 0 and short blacklist_duration
+        let address: SocketAddr = "127.0.0.1:9006".parse().unwrap();
+        let prefix_length = 0; // Store all packets
+        let pow_difficulty = 1;
+        let max_ttl = 60; // 1 minute
+        let min_argon2_params = SerializableArgon2Params {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+            output_length: Some(32),
+        };
+        let cleanup_interval = Duration::from_secs(5);
+        let blacklist_duration = Duration::from_secs(5); // Short duration for testing
+        let node = create_node(address, prefix_length, pow_difficulty, max_ttl, min_argon2_params.clone(), cleanup_interval, blacklist_duration).await;
+
+        // Create client
+        let auth = Authentication::new();
+        let encryption = Encryption::new();
+        let client = Client::new(auth, encryption, address);
+        let client = Arc::new(client);
+
+        // Allow node to start
+        wait_short().await;
+
+        // Subscribe to node
+        let client_sub = client.clone();
+        let client_sub_ver_key = &client_sub.auth.verifying_key().clone();
+        let client_sub_pub_key = &client_sub.encryption.permanent_public_key.clone();
+        let subscribe_handle = tokio::spawn(async move {
+            client_sub.subscribe_and_receive_messages(pow_difficulty).await;
+        });
+
+        // Allow subscription to process
+        wait_short().await;
+
+        // Send an invalid packet to blacklist the client
+        let message_invalid_ttl = b"Invalid TTL packet for blacklist expiration test";
+        let _recipient_address_invalid_ttl = generate_recipient_address(&client.auth.verifying_key(), &client.encryption.permanent_public_key);
+
+        let pow_difficulty_invalid_ttl = pow_difficulty;
+        let ttl_invalid = max_ttl + 10; // Exceeds max_ttl
+
+        let argon2_params_invalid_ttl = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
+        let serializable_params_invalid_ttl = SerializableArgon2Params::from_argon2_params(&argon2_params_invalid_ttl);
+
+        client
+            .send_message(
+                client_sub_ver_key,
+                client_sub_pub_key,
+                message_invalid_ttl,
+                pow_difficulty_invalid_ttl,
+                ttl_invalid,
+                serializable_params_invalid_ttl.clone(),
+            )
+            .await;
+
+        // Allow time for message to be processed and blacklisting
+        wait_short().await;
+
+        // Verify that the sender is blacklisted
+        {
+            let blacklist = node.blacklist.lock().await;
+            assert!(blacklist.contains_key(&address.ip()));
+        }
+
+        // Wait for blacklist expiration (short duration for testing)
+        tokio::time::sleep(Duration::from_secs(6)).await; // Wait a bit longer than the blacklist timeout
+
+        // Verify that the blacklist entry has been removed
+        {
+            let blacklist = node.blacklist.lock().await;
+            assert!(!blacklist.contains_key(&address.ip()));
+        }
+
+        // Send a valid packet again, which should now be accepted
+        let message_valid = b"Valid message after blacklist expiration";
+        let _recipient_address_valid = generate_recipient_address(&client.auth.verifying_key(), &client.encryption.permanent_public_key);
+
+        let pow_difficulty_valid = pow_difficulty;
+        let ttl_valid = 60; // Within max_ttl
+
+        let argon2_params_valid = Argon2Params::new(1024, 1, 1, Some(32)).unwrap();
+        let serializable_params_valid = SerializableArgon2Params::from_argon2_params(&argon2_params_valid);
+
+        client
+            .send_message(
+                client_sub_ver_key,
+                client_sub_pub_key,
+                message_valid,
+                pow_difficulty_valid,
+                ttl_valid,
+                serializable_params_valid.clone(),
+            )
+            .await;
+
+        // Allow time for message to be processed
+        wait_short().await;
+
+        // Verify that the new packet is stored
+        {
+            let store = node.packet_store.lock().await;
+            assert_eq!(store.len(), 1);
+        }
+
+        // Clean up: cancel the subscription task
+        subscribe_handle.abort();
+    }
 
 }

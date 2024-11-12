@@ -1,575 +1,686 @@
-// src/node/node.rs
+// src/node.rs
 
-use crate::{
-    common::{HandshakeInfo, Message},
-    packet::Packet,
-    serializable_argon2_params::SerializableArgon2Params,
-};
-use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-    sync::Arc,
-};
-#[allow(unused_imports)]
-use log::{info, debug, warn, error};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::{Mutex, mpsc},
-};
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::packet::{Packet, Address, ADDRESS_LENGTH};
+use crate::common::{Message, NodeInfo};
+use crate::serializable_argon2_params::SerializableArgon2Params;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc};
+use tokio::sync::broadcast::{self, Sender as BroadcastSender};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use sha2::{Sha256, Digest};
+use log::{info, warn, error};
+use tokio::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH}; // Added for timestamp management
 
-use super::peer::Peer;
+type NodeId = [u8; 20]; // 160-bit node ID
 
+/// Kademlia Node
 pub struct Node {
-    pub id: usize,
-    pub prefix: Vec<u8>,
-    pub messages: Arc<Mutex<HashMap<Vec<u8>, Packet>>>,
-    pub peers: Arc<Mutex<HashMap<usize, Arc<Peer>>>>,
-    pub pow_difficulty: usize,
-    pub max_ttl: u64,
-    pub blacklist: Arc<Mutex<HashSet<SocketAddr>>>,
-    pub min_argon2_params: SerializableArgon2Params,
+    pub id: NodeId,
     pub address: SocketAddr,
-    pub known_nodes: Arc<Mutex<HashSet<SocketAddr>>>,
-    pub connect_sender: mpsc::Sender<SocketAddr>,
+    pub prefix_length: usize, // Number of bits in the prefix
+    pub routing_table: Arc<Mutex<RoutingTable>>,
+    pub packet_store: Arc<Mutex<HashMap<Vec<u8>, Packet>>>, // Store packets by pow_hash
+    pub blacklist: Arc<Mutex<HashMap<IpAddr, Instant>>>, // IP blacklist with timeout
+    pub network_tx: mpsc::Sender<NetworkMessage>,
+    pub network_rx: Arc<Mutex<mpsc::Receiver<NetworkMessage>>>,
+    pub pow_difficulty: usize, // Difficulty for PoW verification
+    pub subscribers: Arc<Mutex<Vec<BroadcastSender<Packet>>>>, // List of subscriber channels
+    pub max_ttl: u64, // Maximum allowed TTL in seconds
+    pub min_argon2_params: SerializableArgon2Params, // Minimum Argon2 parameters
+    pub cleanup_interval: Duration, 
+    pub blacklist_duration: Duration,
+}
+
+pub enum NetworkMessage {
+    Incoming { stream: TcpStream },
+    Outgoing { message: Message, address: SocketAddr },
 }
 
 impl Node {
+    /// Create a new node
     pub async fn new(
-        id: usize,
-        prefix: Vec<u8>,
-        pow_difficulty: usize,
-        max_ttl: u64,
-        min_argon2_params: SerializableArgon2Params,
+        public_key: &[u8],
         address: SocketAddr,
+        prefix_length: usize,
+        pow_difficulty: usize,
+        max_ttl: u64, // New parameter
+        min_argon2_params: SerializableArgon2Params, // New parameter
+        cleanup_interval: Duration, 
+        blacklist_duration: Duration,
     ) -> Arc<Self> {
-        let (connect_sender, mut connect_receiver) = mpsc::channel(100);
+        // Generate node ID by hashing the node's public key
+        let id = generate_node_id(public_key);
 
+        let (network_tx, network_rx) = mpsc::channel(100);
         let node = Arc::new(Node {
             id,
-            prefix,
-            messages: Arc::new(Mutex::new(HashMap::new())),
-            peers: Arc::new(Mutex::new(HashMap::new())),
-            pow_difficulty,
-            max_ttl,
-            blacklist: Arc::new(Mutex::new(HashSet::new())),
-            min_argon2_params,
             address,
-            known_nodes: Arc::new(Mutex::new(HashSet::new())),
-            connect_sender,
+            prefix_length,
+            routing_table: Arc::new(Mutex::new(RoutingTable::new(id))),
+            packet_store: Arc::new(Mutex::new(HashMap::new())),
+            blacklist: Arc::new(Mutex::new(HashMap::new())),
+            network_tx,
+            network_rx: Arc::new(Mutex::new(network_rx)),
+            pow_difficulty,
+            subscribers: Arc::new(Mutex::new(Vec::new())),
+
+            // Initialize new fields
+            max_ttl,
+            min_argon2_params,
+            cleanup_interval,
+            blacklist_duration,
         });
 
-        let node_clone = Arc::clone(&node);
+        let node_clone = node.clone();
         tokio::spawn(async move {
-            while let Some(addr) = connect_receiver.recv().await {
-                let node_clone_inner = Arc::clone(&node_clone);
-                if let Err(e) = node_clone_inner.connect_to_peer(addr).await {
-                    error!("Failed to connect to discovered node {}: {:?}", addr, e);
-                }
-            }
+            node_clone.run().await;
+        });
+
+        // Spawn the cleanup task
+        let node_clone_for_cleanup = node.clone();
+        tokio::spawn(async move {
+            node_clone_for_cleanup.cleanup_expired_packets().await;
         });
 
         node
     }
 
-    pub async fn run(self: Arc<Self>) -> tokio::io::Result<()> {
-        let listener = TcpListener::bind(self.address).await?;
-        info!("Node {} listening on {}", self.id, self.address);
+    /// Main loop to accept incoming connections and handle network messages
+    pub async fn run(self: Arc<Self>) {
+        // Start listening for incoming connections
+        let listener = TcpListener::bind(self.address).await.expect("Failed to bind");
+        info!("Node {} listening on {}", hex::encode(self.id), self.address);
 
-        loop {
-            let (socket, addr) = listener.accept().await?;
-            let node = Arc::clone(&self);
-
-            // Refuse connection if IP is blacklisted
-            if self.blacklist.lock().await.contains(&addr) {
-                warn!("Refusing connection from blacklisted IP: {}", addr);
-                continue;
-            }
-
-            tokio::spawn(async move {
-                if let Err(e) = node.handle_connection(socket, Some(addr)).await {
-                    error!("Error handling connection from {}: {:?}", addr, e);
-                }
-            });
-        }
-    }
-
-    pub async fn send_handshake(&self, peer: &Peer) -> tokio::io::Result<()> {
-        let handshake = HandshakeInfo {
-            prefix: self.prefix.clone(),
-            max_ttl: self.max_ttl,
-            pow_difficulty: self.pow_difficulty,
-            min_argon2_params: self.min_argon2_params.clone(),
-            known_nodes: self.get_known_nodes_snapshot().await,
-            is_node: true, // Assuming this node wants to participate in gossip and forwarding
-            id: self.id,
-            address: self.address,
-        };
-        let message = Message::Handshake(handshake);
-        peer.send_message(&message).await
-    }
-
-    pub async fn get_known_nodes_snapshot(&self) -> Vec<SocketAddr> {
-        let known_nodes = self.known_nodes.lock().await;
-        known_nodes.iter().cloned().collect()
-    }
-
-    pub async fn handle_connection(
-        self: Arc<Self>,
-        socket: TcpStream,
-        addr: Option<SocketAddr>,
-    ) -> tokio::io::Result<()> {
-        if let Some(ip) = addr {
-            // Refuse handling if IP is blacklisted
-            if self.blacklist.lock().await.contains(&ip) {
-                warn!("Ignoring connection from blacklisted IP: {}", ip);
-                return Ok(());
-            }
-        }
-
-        let peer = Peer::new(socket, addr).await?;
-        let peer_id = peer.id;
-        self.peers
-            .lock()
-            .await
-            .insert(peer_id, Arc::new(peer.clone()));
-
-        // Send handshake immediately after establishing connection
-        self.send_handshake(&peer).await?;
-
-        // Start receiving packets from the peer
-        let node_clone = Arc::clone(&self);
-        let peer_arc = Arc::new(peer);
+        // Spawn task to accept incoming connections
+        let node_clone = self.clone();
         tokio::spawn(async move {
-            peer_arc.receive_packets(node_clone).await;
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let _ = node_clone.network_tx.send(NetworkMessage::Incoming { stream }).await;
+                    }
+                    Err(e) => {
+                        error!("Failed to accept connection: {:?}", e);
+                    }
+                }
+            }
         });
 
-        Ok(())
+        // Handle network messages
+        while let Some(message) = self.network_rx.lock().await.recv().await {
+            match message {
+                NetworkMessage::Incoming { stream } => {
+                    // Handle incoming connection
+                    let node_clone = self.clone();
+                    tokio::spawn(async move {
+                        node_clone.handle_connection(stream).await;
+                    });
+                }
+                NetworkMessage::Outgoing { message, address } => {
+                    // Send message to address
+                    let node_clone = self.clone();
+                    tokio::spawn(async move {
+                        node_clone.send_message(message, address).await;
+                    });
+                }
+            }
+        }
     }
 
-    pub async fn connect_to_peer(self: Arc<Self>, addr: SocketAddr) -> tokio::io::Result<()> {
-        if addr == self.address {
-            return Ok(()); // Avoid connecting to self
+    /// Periodically cleans up expired packets based on their TTL
+    async fn cleanup_expired_packets(self: Arc<Self>) {
+        loop {
+            // Sleep for the defined cleanup interval before next cleanup
+            tokio::time::sleep(self.cleanup_interval).await;
+
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let expired_keys = {
+                let store = self.packet_store.lock().await;
+                store
+                    .iter()
+                    .filter_map(|(key, packet)| {
+                        if packet.timestamp + packet.ttl <= current_time {
+                            Some(key.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<Vec<u8>>>()
+            };
+
+            if !expired_keys.is_empty() {
+                let mut store = self.packet_store.lock().await;
+                for key in expired_keys {
+                    if let Some(packet) = store.remove(&key) {
+                        info!(
+                            "Removed expired packet with pow_hash: {}",
+                            hex::encode(&packet.pow_hash)
+                        );
+                    }
+                }
+            }
+
+            // Cleanup expired blacklist entries
+            let expired_blacklist = {
+                let blacklist = self.blacklist.lock().await;
+                blacklist
+                    .iter()
+                    .filter_map(|(ip, timeout)| {
+                        if Instant::now() >= *timeout {
+                            Some(*ip)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<IpAddr>>()
+            };
+
+            if !expired_blacklist.is_empty() {
+                let mut blacklist = self.blacklist.lock().await;
+                for ip in expired_blacklist {
+                    blacklist.remove(&ip);
+                    info!("Removed IP from blacklist: {}", ip);
+                }
+            }
+        }
+    }
+
+    /// Handle an incoming connection
+    async fn handle_connection(self: Arc<Self>, mut stream: TcpStream) {
+        let mut buffer = vec![0u8; 8192]; // Adjust buffer size as needed
+
+        let peer_addr = match stream.peer_addr() {
+            Ok(addr) => addr,
+            Err(e) => {
+                error!("Failed to get peer address: {:?}", e);
+                return;
+            }
+        };
+
+        let peer_ip = peer_addr.ip();
+
+        // Check if the IP is blacklisted
+        if self.is_blacklisted(&peer_ip).await {
+            warn!("Connection from blacklisted IP: {}", peer_ip);
+            return;
         }
 
-        // Check if already connected
-        {
-            let peers = self.peers.lock().await;
-            
-            // Collect peer addresses
-            let mut is_already_connected = false;
-            for peer in peers.values() {
-                let peer_addr = peer.address.lock().await.clone();
-                if peer_addr == Some(addr) {
-                    info!("Node {} is already connected to {}", self.id, addr);
-                    is_already_connected = true;
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(0) => {
+                    // Connection closed
+                    break;
+                }
+                Ok(n) => {
+                    // Deserialize the message
+                    if let Ok(message) = bincode::deserialize::<Message>(&buffer[..n]) {
+                        let sender_address = peer_addr;
+
+                        match message {
+                            Message::Subscribe => {
+                                // Handle subscription
+                                let node_clone = self.clone();
+                                tokio::spawn(async move {
+                                    node_clone.handle_subscribe(sender_address, stream).await;
+                                });
+                                // After subscribing, we no longer read from this stream
+                                break;
+                            }
+                            _ => {
+                                self.handle_message(message, sender_address).await;
+                            }
+                        }
+                    } else {
+                        error!("Failed to deserialize message from {}", peer_ip);
+                        self.blacklist_ip(&peer_ip).await;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to read from connection: {:?}", e);
                     break;
                 }
             }
-
-            if is_already_connected {
-                return Ok(());
-            }
         }
+    }
 
-        // Refuse connection if IP is blacklisted
-        if self.blacklist.lock().await.contains(&addr) {
-            warn!("Node {} refusing to connect to blacklisted IP: {}", self.id, addr);
-            return Ok(());
-        }
-
-        match TcpStream::connect(addr).await {
-            Ok(socket) => {
-                let peer = Peer::new(socket, Some(addr)).await?;
-                let peer_id = peer.id;
-                let peer_arc = Arc::new(peer.clone());
-                self.peers
-                    .lock()
-                    .await
-                    .insert(peer_id, Arc::clone(&peer_arc));
-
-                // Send handshake immediately after connecting
-                self.send_handshake(&peer).await?;
-
-                // Start receiving packets from the peer
-                let node_clone = Arc::clone(&self);
-                let peer_clone = Arc::clone(&peer_arc);
-                tokio::spawn(async move {
-                    peer_clone.receive_packets(node_clone).await;
-                });
-
-                // Add to known nodes
-                self.known_nodes.lock().await.insert(addr);
-                info!("Node {} connected to peer at {}", self.id, addr);
-
-                Ok(())
+    /// Handle an incoming message
+    async fn handle_message(&self, message: Message, sender_address: SocketAddr) {
+        match message {
+            Message::Store(packet) => {
+                self.handle_store(packet, sender_address).await;
             }
-            Err(e) => {
-                error!("Node {} failed to connect to {}: {:?}", self.id, addr, e);
-                Err(e)
+            Message::FindNode(target_id) => {
+                let closest_nodes = self.find_closest_nodes(&target_id).await;
+                let response = Message::Nodes(closest_nodes);
+                self.send_message(response, sender_address).await;
+            }
+            Message::Nodes(nodes) => {
+                // Update routing table with received nodes
+                for node_info in nodes {
+                    self.update_routing_table(node_info).await;
+                }
+            }
+            Message::Packet(packet) => {
+                self.handle_packet(packet, sender_address).await;
+            }
+            Message::Ping => {
+                let response = Message::Pong;
+                self.send_message(response, sender_address).await;
+            }
+            Message::Pong => {
+                // Update routing table to mark node as responsive
+                self.mark_node_alive(sender_address).await;
+            }
+            _ => {
+                warn!("Received unknown message type from {}", sender_address);
             }
         }
     }
 
-    // Gossip protocol
+    /// Handle a Subscribe message
+    async fn handle_subscribe(self: Arc<Self>, sender_address: SocketAddr, mut stream: TcpStream) {
+        let (tx, mut rx) = broadcast::channel::<Packet>(100);
 
-    pub fn start_gossip(self: &Arc<Self>) {
-        let node = Arc::clone(self);
+        {
+            let mut subscribers = self.subscribers.lock().await;
+            subscribers.push(tx.clone());
+        }
+
+        info!("Client {} subscribed", sender_address);
+
+        // Send all stored packets to the subscriber
+        let packets = {
+            let store = self.packet_store.lock().await;
+            store.values().cloned().collect::<Vec<Packet>>()
+        };
+
+        for packet in packets {
+            let _ = tx.send(packet);
+        }
+
+        // Continuously send new packets to the subscriber
+        let self_clone = self.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
-                interval.tick().await;
-                node.gossip_known_nodes().await;
+                match rx.recv().await {
+                    Ok(packet) => {
+                        let message = Message::Packet(packet);
+                        let data = bincode::serialize(&message).expect("Failed to serialize message");
+                        if let Err(e) = stream.write_all(&data).await {
+                            error!("Failed to send message to subscriber: {:?}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Broadcast channel error: {:?}", e);
+                        break;
+                    }
+                }
+            }
+
+            // Remove subscriber when done
+            {
+                let mut subscribers = self_clone.subscribers.lock().await;
+                subscribers.retain(|s| s.receiver_count() > 0);
             }
         });
     }
 
-    async fn gossip_known_nodes(&self) {
-        let peers = self.peers.lock().await;
-        let known_nodes: Vec<SocketAddr> = {
-            let known_nodes = self.known_nodes.lock().await;
-            known_nodes.iter().cloned().collect()
-        };
-
-        // Clone peers to avoid holding the lock while spawning tasks
-        let peers_cloned: Vec<Arc<Peer>> = peers.values().cloned().collect();
-
-        drop(peers); // Release the lock
-
-        for peer in peers_cloned {
-            // Obtain the peer's address
-            let addr_opt = *peer.address.lock().await;
-            if let Some(addr) = addr_opt {
-                // Skip if the peer's address is blacklisted
-                if self.blacklist.lock().await.contains(&addr) {
-                    warn!("Skipping blacklisted IP {} during gossip", addr);
-                    continue;
-                }
-            }
-
-            // Check if handshake is complete
-            {
-                let handshake = peer.handshake_info.lock().await;
-                if handshake.is_none() {
-                    warn!(
-                        "Skipping gossip to peer {} as handshake is not complete",
-                        peer.id
-                    );
-                    continue;
-                }
-            }
-
-            let peer_clone = Arc::clone(&peer);
-            let nodes = known_nodes.clone();
-            tokio::spawn(async move {
-                if let Err(e) = peer_clone.send_known_nodes(&nodes).await {
-                    error!("Failed to send known nodes to peer {}: {:?}", peer_clone.id, e);
-                }
-            });
-        }
-    }
-
-    pub async fn update_known_nodes(&self, nodes: Vec<SocketAddr>) {
-        for addr in nodes {
-            if addr != self.address {
-                // Check if the addr is blacklisted
-                {
-                    let blacklist = self.blacklist.lock().await;
-                    if blacklist.contains(&addr) {
-                        warn!("Not adding blacklisted IP {} to known nodes", addr);
-                        continue;
-                    }
-                }
-
-                let mut known_nodes = self.known_nodes.lock().await;
-                if !known_nodes.contains(&addr) {
-                    known_nodes.insert(addr);
-                    // Send the address to the connect task
-                    if let Err(e) = self.connect_sender.send(addr).await {
-                        error!("Failed to send address {} to connection queue: {:?}", addr, e);
-                    }
-                }
-            }
-        }
-    }
-
-    // Check if Argon2id parameters are acceptable
-    fn is_acceptable_argon2_params(&self, params: &SerializableArgon2Params) -> bool {
-        params.m_cost >= self.min_argon2_params.m_cost
-            && params.t_cost >= self.min_argon2_params.t_cost
-            && params.p_cost >= self.min_argon2_params.p_cost
-    }
-
-    // Handle the HandshakeInfo
-    pub async fn handle_handshake(&self, peer: Arc<Peer>, handshake: HandshakeInfo) {
-        // Validate handshake parameters
-        if !self.is_acceptable_handshake(&handshake) {
-            warn!(
-                "Node {} received unacceptable handshake parameters from peer {}",
-                self.id, peer.id
-            );
-            // Blacklist the peer's IP
-            let addr = handshake.address;
-            self.blacklist_ip(addr).await;
-            return;
-        }
-
-        // Update the peer's address based on handshake
-        peer.update_address(handshake.address).await;
-
-        info!(
-            "Node {} updated peer {} address to {}",
-            self.id, peer.id, handshake.address
-        );
-
-        // Update node's known nodes with peer's known nodes
-        self.update_known_nodes(handshake.known_nodes).await;
-
-        if handshake.is_node {
-            info!("Peer {} is a node and will participate in gossip and forwarding", peer.id);
-            // Implement any additional logic for nodes here
-        } else {
-            info!("Peer {} is a client and will only send/receive messages", peer.id);
-            // Implement any client-specific logic here
-        }
-
-        // Additional handling based on handshake info can be done here
-    }
-
-    fn is_acceptable_handshake(&self, handshake: &HandshakeInfo) -> bool {
-        // Validate recipient prefix
-        if !handshake.prefix.starts_with(&self.prefix) {
-            return false;
-        }
-
-        // Validate max_ttl
-        if handshake.max_ttl > self.max_ttl {
-            return false;
-        }
-
-        // Validate PoW difficulty
-        if handshake.pow_difficulty < self.pow_difficulty {
-            return false;
-        }
-
-        // Validate Argon2 parameters
-        self.is_acceptable_argon2_params(&handshake.min_argon2_params)
-    }
-
-    // Receive a packet and process it
-    pub async fn receive_packet(&self, packet: Packet, sender_id: Option<usize>) {
-        info!(
-            "Node {} received packet destined for address {:?}",
-            self.id, packet.recipient_address
-        );
-
-        // Ensure that the peer has completed the handshake
-        if let Some(s_id) = sender_id {
-            let peers = self.peers.lock().await;
-            if let Some(peer) = peers.get(&s_id) {
-                let handshake = peer.handshake_info.lock().await;
-                if handshake.is_none() {
-                    warn!(
-                        "Node {} received a packet from peer {} before completing handshake",
-                        self.id, s_id
-                    );
-                    return;
-                }
-            }
-        }
-
-        // If the sender is blacklisted, ignore the packet
-        if let Some(s_id) = sender_id {
-            let peers = self.peers.lock().await;
-            if let Some(peer) = peers.get(&s_id) {
-                let addr_opt = *peer.address.lock().await;
-                if let Some(addr) = addr_opt {
-                    let blacklist = self.blacklist.lock().await;
-                    if blacklist.contains(&addr) {
-                        warn!(
-                            "Node {} ignoring packet from blacklisted IP {}",
-                            self.id, addr
-                        );
-                        return;
-                    }
-                }
-            }
-        }
-
-        // Check for Duplicate Packet
-        {
-            let messages = self.messages.lock().await;
-            if messages.contains_key(&packet.pow_hash) {
-                info!(
-                    "Node {} already has packet with pow_hash {:?}, ignoring duplicate",
-                    self.id, packet.pow_hash
-                );
-                return; // Ignore the duplicate packet
-            }
-        }
-
-        // Verify Argon2id parameters
-        if !self.is_acceptable_argon2_params(&packet.argon2_params) {
-            warn!(
-                "Node {} received packet with unacceptable Argon2id parameters from node {:?}",
-                self.id, sender_id
-            );
-            return; // Discard the packet
-        }
-
-        // Verify PoW
-        if !packet.verify_pow(self.pow_difficulty) {
-            warn!(
-                "Node {} received packet with invalid PoW from node {:?}",
-                self.id, sender_id
-            );
-
-            // Blacklist the sender if known
-            if let Some(s_id) = sender_id {
-                let peers = self.peers.lock().await;
-                if let Some(peer) = peers.get(&s_id) {
-                    let addr_opt = *peer.address.lock().await;
-                    if let Some(addr) = addr_opt {
-                        self.blacklist_ip(addr).await;
-                    }
-                }
-            }
-
-            // Do not process the packet further
-            return;
-        }
-
-        // Check TTL
-        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    /// Handle a Store message
+    async fn handle_store(&self, packet: Packet, sender_address: SocketAddr) {
+        // Step 1: Verify TTL
         if packet.ttl > self.max_ttl {
             warn!(
-                "Node {} received packet with TTL {} exceeding max TTL {}",
-                self.id, packet.ttl, self.max_ttl
+                "Packet TTL {} exceeds max_ttl {} from {}",
+                packet.ttl, self.max_ttl, sender_address
             );
-            return; // Discard the packet
+            self.blacklist_ip(&sender_address.ip()).await;
+            return;
         }
 
-        if current_time > packet.timestamp + packet.ttl {
+        // Step 2: Verify Argon2 parameters
+        if !packet.argon2_params.meets_min(&self.min_argon2_params) {
             warn!(
-                "Node {} received packet with expired TTL",
-                self.id
+                "Packet argon2_params {:?} below min_argon2_params {:?} from {}",
+                packet.argon2_params, self.min_argon2_params, sender_address
             );
-            return; // Discard the packet
+            self.blacklist_ip(&sender_address.ip()).await;
+            return;
         }
 
-        // Store the packet if the recipient address matches the node's prefix
-        if packet.recipient_address.starts_with(&self.prefix) {
-            let mut messages = self.messages.lock().await;
-            messages.insert(packet.pow_hash.clone(), packet.clone());
-            info!(
-                "Node {} stored packet. Total messages stored: {}",
-                self.id,
-                messages.len()
+        // Step 3: Verify PoW
+        if !packet.verify_pow(self.pow_difficulty) {
+            warn!("Invalid PoW from {}", sender_address);
+            self.blacklist_ip(&sender_address.ip()).await;
+            return;
+        }
+
+        // Step 4: Check if the packet should be stored on this node
+        if self.should_store_packet(&packet.recipient_address) {
+            self.store_packet(packet).await;
+            info!("Stored packet on node {}", hex::encode(self.id));
+        } else {
+            // Forward the packet to nodes closer to the recipient address
+            self.forward_packet(packet, sender_address).await;
+        }
+    }
+
+    /// Handle a Packet message
+    async fn handle_packet(&self, packet: Packet, sender_address: SocketAddr) {
+        // Step 1: Verify TTL
+        if packet.ttl > self.max_ttl {
+            warn!(
+                "Packet TTL {} exceeds max_ttl {} from {}",
+                packet.ttl, self.max_ttl, sender_address
             );
+            self.blacklist_ip(&sender_address.ip()).await;
+            return;
         }
 
-        // Forward the packet to connected peers (excluding blacklisted peers)
-        let peers = self.peers.lock().await;
-        // Clone peers to avoid holding the lock while spawning tasks
-        let peers_cloned: Vec<Arc<Peer>> = peers.values().cloned().collect();
-        drop(peers); // Release the lock
+        // Step 2: Verify Argon2 parameters
+        if !packet.argon2_params.meets_min(&self.min_argon2_params) {
+            warn!(
+                "Packet argon2_params {:?} below min_argon2_params {:?} from {}",
+                packet.argon2_params, self.min_argon2_params, sender_address
+            );
+            self.blacklist_ip(&sender_address.ip()).await;
+            return;
+        }
 
-        for peer in peers_cloned {
-            // Avoid forwarding back to the sender
-            if Some(peer.id) == sender_id {
-                continue;
-            }
+        // Step 3: Verify PoW
+        if !packet.verify_pow(self.pow_difficulty) {
+            warn!("Invalid PoW from {}", sender_address);
+            self.blacklist_ip(&sender_address.ip()).await;
+            return;
+        }
 
-            // Check if the peer is blacklisted
-            let addr_opt = *peer.address.lock().await;
-            if let Some(addr) = addr_opt {
-                let blacklist = self.blacklist.lock().await;
-                if blacklist.contains(&addr) {
-                    warn!(
-                        "Node {} not forwarding to blacklisted peer {} at IP {}",
-                        self.id, peer.id, addr
-                    );
-                    continue;
-                }
-            }
-
-            // Forward the packet
-            let peer_clone = Arc::clone(&peer);
-            let packet_clone = packet.clone();
-            tokio::spawn(async move {
-                let message = Message::Packet(packet_clone);
-                if let Err(e) = peer_clone.send_message(&message).await {
-                    error!("Failed to forward packet to peer {}: {:?}", peer_clone.id, e);
-                }
-            });
+        // Step 4: Decide to store or forward the packet
+        if self.should_store_packet(&packet.recipient_address) {
+            self.store_packet(packet).await;
+            info!("Stored packet on node {}", hex::encode(self.id));
+        } else {
+            // Forward the packet to nodes closer to the recipient address
+            self.forward_packet(packet, sender_address).await;
         }
     }
 
-    // Retrieve all messages stored in the node
-    pub async fn get_all_messages(&self) -> Vec<Packet> {
-        self.purge_expired_messages().await; // Purge expired messages before returning
-        let messages = self.messages.lock().await;
-        info!(
-            "Node {} providing {} messages",
-            self.id,
-            messages.len()
-        );
-        messages.values().cloned().collect()
+    /// Determine if the node should store the packet based on its prefix
+    fn should_store_packet(&self, recipient_address: &Address) -> bool {
+        let recipient_bits = address_to_bits(recipient_address);
+        let node_id_bits = address_to_bits(&self.id);
+
+        if self.prefix_length == 0 {
+            return true; // Store all packets
+        }
+
+        if self.prefix_length > recipient_bits.len() {
+            return false;
+        }
+
+        recipient_bits[..self.prefix_length] == node_id_bits[..self.prefix_length]
     }
 
-    // Purge expired messages
-    async fn purge_expired_messages(&self) {
-        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let mut messages = self.messages.lock().await;
-        messages.retain(|_, packet| {
-            current_time <= packet.timestamp + packet.ttl
-        });
-    }
-
-    // Blacklist an IP address and remove it from known nodes and peers
-    pub async fn blacklist_ip(&self, addr: SocketAddr) {
+    /// Store a packet and notify subscribers
+    async fn store_packet(&self, packet: Packet) {
         {
-            let mut blacklist = self.blacklist.lock().await;
-            if !blacklist.insert(addr) {
-                // IP was already blacklisted
+            let mut store = self.packet_store.lock().await;
+            store.insert(packet.pow_hash.clone(), packet.clone());
+        }
+
+        // Notify subscribers about the new packet
+        let subscribers = self.subscribers.lock().await;
+        for subscriber in subscribers.iter() {
+            let _ = subscriber.send(packet.clone());
+        }
+    }
+
+    /// Forward a packet to nodes closer to the recipient address
+    async fn forward_packet(&self, packet: Packet, sender_address: SocketAddr) {
+        let recipient_id = packet.recipient_address;
+        let closest_nodes = self.find_closest_nodes(&recipient_id).await;
+
+        // Remove the sender from the list to prevent loops
+        let nodes_to_send: Vec<_> = closest_nodes
+            .into_iter()
+            .filter(|node| node.address != sender_address)
+            .collect();
+
+        if nodes_to_send.is_empty() {
+            warn!("No nodes closer to the recipient address to forward the packet");
+            return;
+        }
+
+        for node in nodes_to_send {
+            let message = Message::Packet(packet.clone());
+            self.send_message(message, node.address).await;
+        }
+    }
+
+    /// Find nodes closest to a target ID (address)
+    async fn find_closest_nodes(&self, target_id: &Address) -> Vec<NodeInfo> {
+        let routing_table = self.routing_table.lock().await;
+        routing_table.find_closest_nodes(target_id)
+    }
+
+    /// Send a message to a specific address
+    async fn send_message(&self, message: Message, address: SocketAddr) {
+        // Check if the IP is blacklisted
+        if self.is_blacklisted(&address.ip()).await {
+            warn!("Attempted to send message to blacklisted IP: {}", address);
+            return;
+        }
+
+        match TcpStream::connect(address).await {
+            Ok(mut stream) => {
+                let data = bincode::serialize(&message).expect("Failed to serialize message");
+                if let Err(e) = stream.write_all(&data).await {
+                    error!("Failed to send message to {}: {:?}", address, e);
+                }
+            }
+            Err(e) => {
+                error!("Failed to connect to {}: {:?}", address, e);
+            }
+        }
+    }
+
+    /// Update the routing table with a new node
+    pub async fn update_routing_table(&self, node_info: NodeInfo) {
+        // Check if the node's IP is blacklisted
+        if self.is_blacklisted(&node_info.address.ip()).await {
+            warn!("Ignoring node {} due to blacklist", node_info.address);
+            return;
+        }
+
+        let mut routing_table = self.routing_table.lock().await;
+        routing_table.update(node_info);
+    }
+
+    /// Mark a node as alive in the routing table
+    async fn mark_node_alive(&self, address: SocketAddr) {
+        // Check if the IP is blacklisted
+        if self.is_blacklisted(&address.ip()).await {
+            warn!("Attempted to mark blacklisted node as alive: {}", address);
+            return;
+        }
+
+        let mut routing_table = self.routing_table.lock().await;
+        routing_table.mark_node_alive(address);
+    }
+
+    /// Blacklist an IP address
+    async fn blacklist_ip(&self, ip: &IpAddr) {
+        let mut blacklist = self.blacklist.lock().await;
+        // Set a timeout for the blacklist (e.g., 10 minutes)
+        let timeout = Instant::now() + self.blacklist_duration;
+        blacklist.insert(*ip, timeout);
+
+        // Remove the node from the routing table
+        let mut routing_table = self.routing_table.lock().await;
+        routing_table.remove_node_by_ip(ip);
+        warn!("Blacklisted IP: {}", ip);
+    }
+
+    /// Check if an IP address is blacklisted (and remove if timeout has expired)
+    async fn is_blacklisted(&self, ip: &IpAddr) -> bool {
+        let mut blacklist = self.blacklist.lock().await;
+        if let Some(&timeout) = blacklist.get(ip) {
+            if Instant::now() >= timeout {
+                blacklist.remove(ip);
+                return false;
+            }
+            return true;
+        }
+        false
+    }
+}
+
+/// Kademlia Routing Table
+pub struct RoutingTable {
+    pub id: NodeId,
+    pub k_buckets: Vec<KBucket>,
+}
+
+pub struct KBucket {
+    pub nodes: Vec<NodeInfo>,
+}
+
+impl RoutingTable {
+    pub fn new(id: NodeId) -> Self {
+        let mut k_buckets = Vec::new();
+        for _ in 0..160 {
+            k_buckets.push(KBucket::new());
+        }
+        RoutingTable { id, k_buckets }
+    }
+
+    fn leading_zeros_in_array(array: &[u8; 20]) -> u32 {
+        let mut leading_zeros = 0;
+        for &byte in array.iter() {
+            let zeros = byte.leading_zeros();
+            leading_zeros += zeros;
+            if zeros < 8 {
+                break;
+            }
+        }
+        leading_zeros
+    }
+
+    /// Find the k closest nodes to the target ID
+    pub fn find_closest_nodes(&self, target_id: &Address) -> Vec<NodeInfo> {
+        let mut all_nodes = Vec::new();
+
+        let target_id = *target_id;
+        let distance = xor_distance(&self.id, &target_id);
+        let bucket_index = Self::leading_zeros_in_array(&distance) as usize;
+
+        // Collect nodes from the closest k-buckets
+        for i in bucket_index..self.k_buckets.len() {
+            all_nodes.extend(self.k_buckets[i].nodes.clone());
+        }
+
+        for i in (0..bucket_index).rev() {
+            all_nodes.extend(self.k_buckets[i].nodes.clone());
+        }
+
+        // Sort nodes by XOR distance to target ID
+        all_nodes.sort_by_key(|node| xor_distance(&node.id, &target_id));
+
+        all_nodes.truncate(K); // Return up to K nodes
+        all_nodes
+    }
+
+    /// Update the routing table with a new node
+    pub fn update(&mut self, node_info: NodeInfo) {
+        let distance = xor_distance(&self.id, &node_info.id);
+        let bucket_index = Self::leading_zeros_in_array(&distance) as usize;
+
+        if bucket_index >= self.k_buckets.len() {
+            return; // Ignore nodes that are too far
+        }
+
+        let bucket = &mut self.k_buckets[bucket_index];
+
+        // Check if the node is already in the bucket
+        if let Some(pos) = bucket.nodes.iter().position(|n| n.id == node_info.id) {
+            // Move the node to the end to mark it as recently seen
+            let node = bucket.nodes.remove(pos);
+            bucket.nodes.push(node);
+        } else {
+            if bucket.nodes.len() < K {
+                bucket.nodes.push(node_info);
+            } else {
+                // Bucket is full; implement replacement policies if needed
+                // For simplicity, we'll replace the least recently seen node
+                bucket.nodes.remove(0);
+                bucket.nodes.push(node_info);
+            }
+        }
+    }
+
+    /// Remove a node by IP address from the routing table
+    pub fn remove_node_by_ip(&mut self, ip: &IpAddr) {
+        for bucket in &mut self.k_buckets {
+            bucket.nodes.retain(|n| &n.address.ip() != ip);
+        }
+    }
+
+    /// Mark a node as alive
+    pub fn mark_node_alive(&mut self, address: SocketAddr) {
+        for bucket in &mut self.k_buckets {
+            if let Some(pos) = bucket.nodes.iter().position(|n| n.address == address) {
+                // Move the node to the end to mark it as recently seen
+                let node = bucket.nodes.remove(pos);
+                bucket.nodes.push(node);
                 return;
             }
-            info!("Node {} blacklisted IP {}", self.id, addr);
         }
-
-        // Remove from known nodes
-        {
-            let mut known_nodes = self.known_nodes.lock().await;
-            if known_nodes.remove(&addr) {
-                info!("Node {} removed IP {} from known nodes", self.id, addr);
-            }
-        }
-
-        // Collect peers to remove
-        let peers_cloned: Vec<(usize, Arc<Peer>)> = {
-            let peers = self.peers.lock().await;
-            peers.iter()
-                .map(|(peer_id, peer)| (*peer_id, Arc::clone(peer)))
-                .collect()
-        };
-
-        let mut peers_to_remove = Vec::new();
-
-        for (peer_id, peer) in peers_cloned {
-            let peer_addr_opt = *peer.address.lock().await;
-            if peer_addr_opt == Some(addr) {
-                peers_to_remove.push(peer_id);
-            }
-        }
-
-        for peer_id in peers_to_remove {
-            if let Some(peer) = self.peers.lock().await.remove(&peer_id) {
-                info!("Node {} disconnecting from blacklisted peer {}", self.id, peer_id);
-                peer.shutdown(); // Signal the peer to shut down
-            }
-        }
-
-        // Optionally, prevent future reconnection attempts by removing from known_nodes or connect_sender queue
-        // Implement logic to prevent reconnection if necessary
     }
+}
+
+impl KBucket {
+    pub fn new() -> Self {
+        KBucket { nodes: Vec::new() }
+    }
+}
+
+/// The maximum number of nodes per k-bucket (k)
+const K: usize = 20;
+
+/// Generates a node ID by hashing the node's public key
+fn generate_node_id(public_key: &[u8]) -> NodeId {
+    let mut hasher = Sha256::new();
+    hasher.update(public_key);
+    let result = hasher.finalize();
+    let mut id = [0u8; 20];
+    id.copy_from_slice(&result[..20]);
+    id
+}
+
+/// Calculates the XOR distance between two node IDs
+fn xor_distance(a: &NodeId, b: &NodeId) -> NodeId {
+    let mut distance = [0u8; 20];
+    for i in 0..20 {
+        distance[i] = a[i] ^ b[i];
+    }
+    distance
+}
+
+/// Converts an Address to a bit vector
+fn address_to_bits(address: &Address) -> Vec<bool> {
+    let mut bits = Vec::with_capacity(ADDRESS_LENGTH * 8);
+    for byte in address.iter() {
+        for i in (0..8).rev() {
+            bits.push((byte >> i) & 1 == 1);
+        }
+    }
+    bits
 }

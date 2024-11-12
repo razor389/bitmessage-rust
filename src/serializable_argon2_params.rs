@@ -2,7 +2,7 @@
 
 use serde::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SerializableArgon2Params {
     pub m_cost: u32,        // Memory cost
     pub t_cost: u32,        // Time cost (iterations)
@@ -28,6 +28,19 @@ impl SerializableArgon2Params {
             t_cost: params.t_cost(),
             p_cost: params.p_cost(),
             output_length: params.output_len(),
+        }
+    }
+
+    /// Check if self meets or exceeds the min params
+    pub fn meets_min(&self, min: &SerializableArgon2Params) -> bool {
+        self.m_cost >= min.m_cost &&
+        self.t_cost >= min.t_cost &&
+        self.p_cost >= min.p_cost &&
+        match (self.output_length, min.output_length) {
+            (Some(a), Some(b)) => a >= b,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => true,
         }
     }
 }

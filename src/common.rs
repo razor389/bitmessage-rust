@@ -2,25 +2,24 @@
 
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
-use crate::{packet::Packet, serializable_argon2_params::SerializableArgon2Params};
+use crate::packet::{Packet, Address};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HandshakeInfo {
-    pub prefix: Vec<u8>,
-    pub max_ttl: u64,
-    pub pow_difficulty: usize,
-    pub min_argon2_params: SerializableArgon2Params,
-    pub known_nodes: Vec<SocketAddr>,
-    pub is_node: bool, // Indicates if the peer wants to participate in gossip and forwarding
-    pub id: usize,      // Peer’s unique ID
-    pub address: SocketAddr, // Peer’s socket address
+pub enum Message {
+    Store(Packet),                  // Store a packet in the network
+    FindNode(Address),              // Find nodes closest to a given ID (Address)
+    Nodes(Vec<NodeInfo>),           // Response containing a list of NodeInfo
+    GetPacket(Address),             // Request to get packets for a recipient address (no longer used)
+    Packet(Packet),                 // A packet sent between nodes or to clients
+    PacketNotFound,                 // Response indicating no packets were found (no longer used)
+    Ping,                           // Ping message for node liveness checks
+    Pong,                           // Pong response
+    Subscribe,                      // Client subscribes to receive all stored packets
+    UnsubscribeAck,                 // Acknowledgment of unsubscription (optional)
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum Message {
-    Packet(Packet),
-    KnownNodes(Vec<SocketAddr>),
-    RequestAllMessages,
-    MessagesResponse(Vec<Packet>),
-    Handshake(HandshakeInfo), // New variant for handshake
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NodeInfo {
+    pub id: [u8; 20],               // Node ID (160-bit hash)
+    pub address: SocketAddr,        // Node's network address
 }
