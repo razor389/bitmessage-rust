@@ -20,7 +20,6 @@ This implementation includes several planned features to enhance the functionali
 
 - **Node Selection**: Client should decide on a prefix length and find a matching node based on their keys.
 - **Unsubscribe**: Client should be able to unsubscribe from a node.
-- **Message Forwarding**: Other nodes with matching prefixes should get the message as well.
 - **Address Changes / Key Mgmt**: Clients should be able to notify contacts of an address change, alternatively we could implement key rotation.
 - **Timeouts**: Implement timeouts on read operations
 - **Group Messaging**: ShadowLink group messaging protocol.

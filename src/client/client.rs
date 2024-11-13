@@ -3,7 +3,7 @@
 use crate::packet::{Packet, Address, ADDRESS_LENGTH};
 use crate::authentication::Authentication;
 use crate::encryption::Encryption;
-use crate::common::Message;
+use crate::common::{Message, NodeInfoExtended};
 use crate::serializable_argon2_params::SerializableArgon2Params;
 use tokio::sync::{mpsc, Mutex};
 use x25519_dalek::PublicKey as X25519PublicKey;
@@ -61,6 +61,36 @@ impl Client {
         rx.recv().await
     }
 
+    /// Perform handshake with node
+    pub async fn handshake_with_node(&self) -> Option<NodeInfoExtended> {
+        match TcpStream::connect(self.node_address).await {
+            Ok(mut stream) => {
+                // Send ClientHandshake message
+                let message = Message::ClientHandshake;
+                let data = bincode::serialize(&message).expect("Failed to serialize message");
+                if let Err(e) = stream.write_all(&data).await {
+                    error!("Failed to send handshake: {:?}", e);
+                }
+
+                // Receive Node's handshake acknowledgment
+                let mut buffer = vec![0u8; 4096];
+                let n = stream.read(&mut buffer).await.expect("Failed to read handshake ack");
+                let response: Message = bincode::deserialize(&buffer[..n]).expect("Failed to deserialize handshake ack");
+
+                if let Message::ClientHandshakeAck(node_info) = response {
+                    // Return node's info
+                    return Some(node_info);
+                } else {
+                    warn!("Unexpected response during handshake");
+                }
+            }
+            Err(e) => {
+                error!("Failed to connect to node: {:?}", e);
+            }
+        }
+        None
+    }
+
     /// Send a message to a recipient
     pub async fn send_message(
         &self,
@@ -101,7 +131,7 @@ impl Client {
         // Send the packet to the connected node
         match TcpStream::connect(self.node_address).await {
             Ok(mut stream) => {
-                let message = Message::Store(packet);
+                let message = Message::Packet(packet);
                 let data = bincode::serialize(&message).expect("Failed to serialize message");
                 if let Err(e) = stream.write_all(&data).await {
                     error!("Failed to send packet: {:?}", e);

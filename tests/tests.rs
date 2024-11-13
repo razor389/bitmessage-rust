@@ -2,14 +2,14 @@
 
 #[cfg(test)]
 mod tests {
-    use bitmessage_rust::authentication::Authentication;
-    use bitmessage_rust::client::Client;
-    use bitmessage_rust::common::NodeInfo;
-    use bitmessage_rust::encryption::Encryption;
-    use bitmessage_rust::node::Node;
-    use bitmessage_rust::packet::{Packet, ADDRESS_LENGTH};
-    use bitmessage_rust::pow::{PoW, PoWAlgorithm};
-    use bitmessage_rust::serializable_argon2_params::SerializableArgon2Params;
+    use shadow_link::authentication::Authentication;
+    use shadow_link::client::Client;
+    use shadow_link::common::NodeInfo;
+    use shadow_link::encryption::Encryption;
+    use shadow_link::node::Node;
+    use shadow_link::packet::{Packet, ADDRESS_LENGTH};
+    use shadow_link::pow::{PoW, PoWAlgorithm};
+    use shadow_link::serializable_argon2_params::SerializableArgon2Params;
     use argon2::Params as Argon2Params;
     use ed25519_dalek::{SigningKey, VerifyingKey};
     use env_logger;

@@ -1,7 +1,7 @@
 // src/node.rs
 
 use crate::packet::{Packet, Address, ADDRESS_LENGTH};
-use crate::common::{Message, NodeInfo};
+use crate::common::{Message, NodeInfo, NodeInfoExtended};
 use crate::serializable_argon2_params::SerializableArgon2Params;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -33,6 +33,7 @@ pub struct Node {
     pub min_argon2_params: SerializableArgon2Params, // Minimum Argon2 parameters
     pub cleanup_interval: Duration, 
     pub blacklist_duration: Duration,
+    pub node_requirements: Arc<Mutex<HashMap<NodeId, NodeInfoExtended>>>,
 }
 
 pub enum NetworkMessage {
@@ -67,12 +68,11 @@ impl Node {
             network_rx: Arc::new(Mutex::new(network_rx)),
             pow_difficulty,
             subscribers: Arc::new(Mutex::new(Vec::new())),
-
-            // Initialize new fields
             max_ttl,
             min_argon2_params,
             cleanup_interval,
             blacklist_duration,
+            node_requirements: Arc::new(Mutex::new(HashMap::new())),
         });
 
         let node_clone = node.clone();
@@ -213,6 +213,45 @@ impl Node {
             return;
         }
 
+        // Receive the handshake from the connecting node
+        let n = match stream.read(&mut buffer).await {
+            Ok(n) => n,
+            Err(e) => {
+                error!("Failed to read from stream: {:?}", e);
+                return;
+            }
+        };
+        
+        let message: Message = match bincode::deserialize(&buffer[..n]) {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!("Failed to deserialize message: {:?}", e);
+                return;
+            }
+        };
+
+        match message {
+            Message::ClientHandshake => {
+                // Send node info to client
+                let handshake_ack = Message::ClientHandshakeAck(self.get_node_info_extended());
+                let data = bincode::serialize(&handshake_ack).expect("Failed to serialize handshake acknowledgement");
+                stream.write_all(&data).await.expect("Failed to write handshake ack");
+                // Proceed to handle further client messages
+            }
+            Message::Handshake(node_info) =>{
+                self.update_routing_table_extended(node_info.clone()).await;
+
+                // Send back our handshake
+                let handshake_ack = Message::HandshakeAck(self.get_node_info_extended());
+                let data = bincode::serialize(&handshake_ack).expect("Failed to serialize handshake acknowledgement");
+                stream.write_all(&data).await.expect("Failed to write handshake ack");
+            }
+            _ =>{
+                warn!("Expected handshake message");
+                return;
+            }
+        }
+
         loop {
             match stream.read(&mut buffer).await {
                 Ok(0) => {
@@ -255,9 +294,6 @@ impl Node {
     /// Handle an incoming message
     async fn handle_message(&self, message: Message, sender_address: SocketAddr) {
         match message {
-            Message::Store(packet) => {
-                self.handle_store(packet, sender_address).await;
-            }
             Message::FindNode(target_id) => {
                 let closest_nodes = self.find_closest_nodes(&target_id).await;
                 let response = Message::Nodes(closest_nodes);
@@ -335,45 +371,6 @@ impl Node {
         });
     }
 
-    /// Handle a Store message
-    async fn handle_store(&self, packet: Packet, sender_address: SocketAddr) {
-        // Step 1: Verify TTL
-        if packet.ttl > self.max_ttl {
-            warn!(
-                "Packet TTL {} exceeds max_ttl {} from {}",
-                packet.ttl, self.max_ttl, sender_address
-            );
-            self.blacklist_ip(&sender_address.ip()).await;
-            return;
-        }
-
-        // Step 2: Verify Argon2 parameters
-        if !packet.argon2_params.meets_min(&self.min_argon2_params) {
-            warn!(
-                "Packet argon2_params {:?} below min_argon2_params {:?} from {}",
-                packet.argon2_params, self.min_argon2_params, sender_address
-            );
-            self.blacklist_ip(&sender_address.ip()).await;
-            return;
-        }
-
-        // Step 3: Verify PoW
-        if !packet.verify_pow(self.pow_difficulty) {
-            warn!("Invalid PoW from {}", sender_address);
-            self.blacklist_ip(&sender_address.ip()).await;
-            return;
-        }
-
-        // Step 4: Check if the packet should be stored on this node
-        if self.should_store_packet(&packet.recipient_address) {
-            self.store_packet(packet).await;
-            info!("Stored packet on node {}", hex::encode(self.id));
-        } else {
-            // Forward the packet to nodes closer to the recipient address
-            self.forward_packet(packet, sender_address).await;
-        }
-    }
-
     /// Handle a Packet message
     async fn handle_packet(&self, packet: Packet, sender_address: SocketAddr) {
         // Step 1: Verify TTL
@@ -403,14 +400,14 @@ impl Node {
             return;
         }
 
-        // Step 4: Decide to store or forward the packet
+        // Step 4: Store the packet if we should
         if self.should_store_packet(&packet.recipient_address) {
-            self.store_packet(packet).await;
+            self.store_packet(packet.clone()).await; // Clone because we'll use it later
             info!("Stored packet on node {}", hex::encode(self.id));
-        } else {
-            // Forward the packet to nodes closer to the recipient address
-            self.forward_packet(packet, sender_address).await;
         }
+
+        // Step 5: Forward the packet to other nodes with matching prefixes
+        self.forward_packet(packet, sender_address).await;
     }
 
     /// Determine if the node should store the packet based on its prefix
@@ -443,22 +440,54 @@ impl Node {
         }
     }
 
-    /// Forward a packet to nodes closer to the recipient address
+    /// Forward a packet to nodes whose prefixes match the recipient address
     async fn forward_packet(&self, packet: Packet, sender_address: SocketAddr) {
         let recipient_id = packet.recipient_address;
-        let closest_nodes = self.find_closest_nodes(&recipient_id).await;
+        let recipient_bits = address_to_bits(&recipient_id);
 
-        // Remove the sender from the list to prevent loops
-        let nodes_to_send: Vec<_> = closest_nodes
-            .into_iter()
-            .filter(|node| node.address != sender_address)
-            .collect();
+        // Get all nodes from the routing table
+        let routing_table = self.routing_table.lock().await;
+        let all_nodes = routing_table.get_all_nodes();
+
+        // Get a snapshot of node requirements
+        let node_requirements = self.node_requirements.lock().await;
+
+        let mut nodes_to_send = Vec::new();
+
+        for node in all_nodes {
+            // Skip the sender to prevent loops
+            if node.address == sender_address {
+                continue;
+            }
+
+            // Get the node's requirements
+            if let Some(reqs) = node_requirements.get(&node.id) {
+                let node_id_bits = address_to_bits(&node.id);
+                let prefix_length = reqs.prefix_length.min(node_id_bits.len()).min(recipient_bits.len());
+
+                // Check if the node's prefix matches the recipient's address
+                if prefix_length > 0 && node_id_bits[..prefix_length] != recipient_bits[..prefix_length] {
+                    continue; // Prefix does not match
+                }
+
+                // Check if the packet meets the node's requirements
+                if packet.ttl > reqs.max_ttl || !packet.argon2_params.meets_min(&reqs.min_argon2_params) {
+                    continue; // Requirements not met
+                }
+
+                nodes_to_send.push(node.clone());
+            }
+        }
+
+        // Drop the lock on node_requirements
+        drop(node_requirements);
 
         if nodes_to_send.is_empty() {
-            warn!("No nodes closer to the recipient address to forward the packet");
+            warn!("No nodes to forward the packet with matching prefixes");
             return;
         }
 
+        // Forward the packet to all matching nodes
         for node in nodes_to_send {
             let message = Message::Packet(packet.clone());
             self.send_message(message, node.address).await;
@@ -504,6 +533,29 @@ impl Node {
         routing_table.update(node_info);
     }
 
+    async fn update_routing_table_extended(&self, node_info: NodeInfoExtended) {
+        // Update routing table and store node's requirements
+        self.update_routing_table(NodeInfo {
+            id: node_info.id,
+            address: node_info.address,
+        }).await;
+
+        // Store node's requirements in a HashMap
+        let mut node_requirements = self.node_requirements.lock().await;
+        node_requirements.insert(node_info.id, node_info);
+    }
+
+    fn get_node_info_extended(&self) -> NodeInfoExtended {
+        NodeInfoExtended {
+            id: self.id,
+            address: self.address,
+            prefix_length: self.prefix_length,
+            pow_difficulty: self.pow_difficulty,
+            max_ttl: self.max_ttl,
+            min_argon2_params: self.min_argon2_params.clone(),
+        }
+    }
+
     /// Mark a node as alive in the routing table
     async fn mark_node_alive(&self, address: SocketAddr) {
         // Check if the IP is blacklisted
@@ -518,6 +570,11 @@ impl Node {
 
     /// Blacklist an IP address
     async fn blacklist_ip(&self, ip: &IpAddr) {
+        // Do not blacklist own IP
+        if ip == &self.address.ip() {
+            warn!("Attempted to blacklist own IP: {}", ip);
+            return;
+        }
         let mut blacklist = self.blacklist.lock().await;
         // Set a timeout for the blacklist (e.g., 10 minutes)
         let timeout = Instant::now() + self.blacklist_duration;
@@ -572,6 +629,15 @@ impl RoutingTable {
             }
         }
         leading_zeros
+    }
+
+    /// Get all nodes in the routing table
+    pub fn get_all_nodes(&self) -> Vec<NodeInfo> {
+        let mut nodes = Vec::new();
+        for bucket in &self.k_buckets {
+            nodes.extend(bucket.nodes.clone());
+        }
+        nodes
     }
 
     /// Find the k closest nodes to the target ID
