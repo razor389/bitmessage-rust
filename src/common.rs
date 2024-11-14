@@ -2,7 +2,7 @@
 
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
-use crate::{packet::{Address, Packet}, serializable_argon2_params::SerializableArgon2Params};
+use crate::{packet::{Address, Packet, ADDRESS_LENGTH}, serializable_argon2_params::SerializableArgon2Params};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Message {
@@ -14,6 +14,7 @@ pub enum Message {
     Ping,                           // Ping message for node liveness checks
     Pong,                           // Pong response
     Subscribe,                      // Client subscribes to receive all stored packets
+    Unsubscribe,                    // Client requests to unsubscribe
     UnsubscribeAck,                 // Acknowledgment of unsubscription (optional)
     Handshake(NodeInfoExtended),    // Handshake with node
     HandshakeAck(NodeInfoExtended), // Acknowledgment variant
@@ -35,4 +36,15 @@ pub struct NodeInfoExtended {
     pub pow_difficulty: usize,
     pub max_ttl: u64,
     pub min_argon2_params: SerializableArgon2Params,
+}
+
+/// Converts an Address to a bit vector
+pub fn address_to_bits(address: &Address) -> Vec<bool> {
+    let mut bits = Vec::with_capacity(ADDRESS_LENGTH * 8);
+    for byte in address.iter() {
+        for i in (0..8).rev() {
+            bits.push((byte >> i) & 1 == 1);
+        }
+    }
+    bits
 }

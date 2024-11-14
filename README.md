@@ -18,8 +18,8 @@ This implementation includes several planned features to enhance the functionali
 
 ### Planned Features
 
-- **Node Selection**: Client should decide on a prefix length and find a matching node based on their keys.
-- **Unsubscribe**: Client should be able to unsubscribe from a node.
+- **Edit Node Subscription Code**: should need node address, not PoW difficulty
+- **Node Selection**: Client should decide on a prefix length and find a matching node based on their keys and other preferences, and possibly other factors for optimality.
 - **Address Changes / Key Mgmt**: Clients should be able to notify contacts of an address change, alternatively we could implement key rotation.
 - **Timeouts**: Implement timeouts on read operations
 - **Group Messaging**: ShadowLink group messaging protocol.

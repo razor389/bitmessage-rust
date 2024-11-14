@@ -1,7 +1,7 @@
 // src/node.rs
 
-use crate::packet::{Packet, Address, ADDRESS_LENGTH};
-use crate::common::{Message, NodeInfo, NodeInfoExtended};
+use crate::packet::{Packet, Address};
+use crate::common::{address_to_bits, Message, NodeInfo, NodeInfoExtended};
 use crate::serializable_argon2_params::SerializableArgon2Params;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::sync::broadcast::{self, Sender as BroadcastSender};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use sha2::{Sha256, Digest};
 use log::{info, warn, error};
 use tokio::time::{Duration, Instant};
@@ -28,7 +28,7 @@ pub struct Node {
     pub network_tx: mpsc::Sender<NetworkMessage>,
     pub network_rx: Arc<Mutex<mpsc::Receiver<NetworkMessage>>>,
     pub pow_difficulty: usize, // Difficulty for PoW verification
-    pub subscribers: Arc<Mutex<Vec<BroadcastSender<Packet>>>>, // List of subscriber channels
+    pub subscribers: Arc<Mutex<HashMap<SocketAddr, BroadcastSender<Packet>>>>, // List of subscriber channels
     pub max_ttl: u64, // Maximum allowed TTL in seconds
     pub min_argon2_params: SerializableArgon2Params, // Minimum Argon2 parameters
     pub cleanup_interval: Duration, 
@@ -52,6 +52,7 @@ impl Node {
         min_argon2_params: SerializableArgon2Params, // New parameter
         cleanup_interval: Duration, 
         blacklist_duration: Duration,
+        bootstrap_nodes: Vec<SocketAddr>,
     ) -> Arc<Self> {
         // Generate node ID by hashing the node's public key
         let id = generate_node_id(public_key);
@@ -67,7 +68,7 @@ impl Node {
             network_tx,
             network_rx: Arc::new(Mutex::new(network_rx)),
             pow_difficulty,
-            subscribers: Arc::new(Mutex::new(Vec::new())),
+            subscribers: Arc::new(Mutex::new(HashMap::new())),
             max_ttl,
             min_argon2_params,
             cleanup_interval,
@@ -84,6 +85,14 @@ impl Node {
         let node_clone_for_cleanup = node.clone();
         tokio::spawn(async move {
             node_clone_for_cleanup.cleanup_expired_packets().await;
+        });
+
+        // Bootstrap the node
+        let node_clone = node.clone();
+        tokio::spawn(async move {
+            for bootstrap_addr in bootstrap_nodes {
+                node_clone.bootstrap(bootstrap_addr).await;
+            }
         });
 
         node
@@ -193,6 +202,82 @@ impl Node {
         }
     }
 
+    async fn bootstrap(&self, bootstrap_addr: SocketAddr) {
+        // Attempt to connect to the bootstrap address
+        let mut stream = match TcpStream::connect(bootstrap_addr).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                error!("Failed to connect to bootstrap node {}: {:?}", bootstrap_addr, e);
+                return; // Exit if connection fails
+            }
+        };
+
+        // Send handshake message
+        if let Err(e) = self.send_handshake(&mut stream).await {
+            error!("Failed to send handshake to {}: {:?}", bootstrap_addr, e);
+            return;
+        }
+
+        // Receive handshake acknowledgment
+        if let Err(e) = self.receive_handshake_ack(&mut stream).await {
+            error!("Failed to receive handshake acknowledgment from {}: {:?}", bootstrap_addr, e);
+            return;
+        }
+
+        // Optionally perform a `FindNode` request to discover more nodes
+        if let Err(e) = self.find_node_request(&mut stream).await {
+            error!("Failed to perform FindNode request with {}: {:?}", bootstrap_addr, e);
+        }
+    }
+
+    async fn send_handshake(&self, stream: &mut TcpStream) -> io::Result<()> {
+        let handshake = Message::Handshake(self.get_node_info_extended());
+        let data = bincode::serialize(&handshake).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Serialization error: {:?}", e))
+        })?;
+        stream.write_all(&data).await
+    }
+
+    async fn receive_handshake_ack(&self, stream: &mut TcpStream) -> io::Result<()> {
+        let mut buffer = vec![0u8; 4096];
+        let n = stream.read(&mut buffer).await?;
+        let message: Message = bincode::deserialize(&buffer[..n]).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Deserialization error: {:?}", e))
+        })?;
+        
+        if let Message::HandshakeAck(node_info) = message {
+            // Update routing table with the received node info
+            self.update_routing_table_extended(node_info).await;
+            Ok(())
+        } else {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid handshake acknowledgment"))
+        }
+    }
+
+    async fn find_node_request(&self, stream: &mut TcpStream) -> io::Result<()> {
+        let find_node = Message::FindNode(self.id);
+        let data = bincode::serialize(&find_node).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Serialization error: {:?}", e))
+        })?;
+        stream.write_all(&data).await?;
+
+        let mut buffer = vec![0u8; 4096];
+        let n = stream.read(&mut buffer).await?;
+        let message: Message = bincode::deserialize(&buffer[..n]).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("Deserialization error: {:?}", e))
+        })?;
+
+        if let Message::Nodes(nodes) = message {
+            for node_info in nodes {
+                self.update_routing_table(node_info).await;
+            }
+            Ok(())
+        } else {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "Expected Nodes response"))
+        }
+    }
+
+
     /// Handle an incoming connection
     async fn handle_connection(self: Arc<Self>, mut stream: TcpStream) {
         let mut buffer = vec![0u8; 8192]; // Adjust buffer size as needed
@@ -273,6 +358,30 @@ impl Node {
                                 // After subscribing, we no longer read from this stream
                                 break;
                             }
+                            Message::Unsubscribe => {
+                                // Remove subscriber
+                                {
+                                    let mut subscribers = self.subscribers.lock().await;
+                                    if subscribers.remove(&sender_address).is_some() {
+                                        info!("Client {} unsubscribed", sender_address);
+                                    } else {
+                                        warn!("Client {} tried to unsubscribe but was not subscribed", sender_address);
+                                    }
+                                }
+                                // Send acknowledgment
+                                let ack = Message::UnsubscribeAck;
+                                let data = match bincode::serialize(&ack) {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        error!("Failed to serialize UnsubscribeAck: {:?}", e);
+                                        return;
+                                    }
+                                };
+                                if let Err(e) = stream.write_all(&data).await {
+                                    error!("Failed to send UnsubscribeAck to {}: {:?}", sender_address, e);
+                                }
+                                break;
+                            }
                             _ => {
                                 self.handle_message(message, sender_address).await;
                             }
@@ -328,7 +437,7 @@ impl Node {
 
         {
             let mut subscribers = self.subscribers.lock().await;
-            subscribers.push(tx.clone());
+            subscribers.insert(sender_address, tx.clone());
         }
 
         info!("Client {} subscribed", sender_address);
@@ -366,7 +475,9 @@ impl Node {
             // Remove subscriber when done
             {
                 let mut subscribers = self_clone.subscribers.lock().await;
-                subscribers.retain(|s| s.receiver_count() > 0);
+                if subscribers.remove(&sender_address).is_some() {
+                    info!("Client {} unsubscribed (stream closed)", sender_address);
+                }
             }
         });
     }
@@ -436,7 +547,7 @@ impl Node {
         // Notify subscribers about the new packet
         let subscribers = self.subscribers.lock().await;
         for subscriber in subscribers.iter() {
-            let _ = subscriber.send(packet.clone());
+            let _ = subscriber.1.send(packet.clone());
         }
     }
 
@@ -740,13 +851,3 @@ fn xor_distance(a: &NodeId, b: &NodeId) -> NodeId {
     distance
 }
 
-/// Converts an Address to a bit vector
-fn address_to_bits(address: &Address) -> Vec<bool> {
-    let mut bits = Vec::with_capacity(ADDRESS_LENGTH * 8);
-    for byte in address.iter() {
-        for i in (0..8).rev() {
-            bits.push((byte >> i) & 1 == 1);
-        }
-    }
-    bits
-}

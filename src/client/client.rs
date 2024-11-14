@@ -1,5 +1,6 @@
 // src/client.rs
 
+use crate::common::address_to_bits;
 use crate::packet::{Packet, Address, ADDRESS_LENGTH};
 use crate::authentication::Authentication;
 use crate::encryption::Encryption;
@@ -136,6 +137,51 @@ impl Client {
                 if let Err(e) = stream.write_all(&data).await {
                     error!("Failed to send packet: {:?}", e);
                 }
+            }
+            Err(e) => {
+                error!("Failed to connect to node: {:?}", e);
+            }
+        }
+    }
+
+    pub async fn find_and_subscribe(&self) {
+        // Perform handshake and get initial node info
+        if let Some(node_info) = self.handshake_with_node().await {
+            // Send FindNode message with our address
+            let message = Message::FindNode(self.address);
+            let data = bincode::serialize(&message)?;
+            let mut stream = TcpStream::connect(self.node_address).await?;
+            stream.write_all(&data).await?;
+
+            // Receive Nodes response
+            let mut buffer = vec![0u8; 8192];
+            let n = stream.read(&mut buffer).await?;
+            let response: Message = bincode::deserialize(&buffer[..n])?;
+
+            if let Message::Nodes(nodes) = response {
+                // Filter nodes with matching prefixes
+                let matching_nodes = nodes.into_iter().filter(|node| {
+                    let node_bits = address_to_bits(&node.id);
+                    let client_bits = address_to_bits(&self.address);
+                    node_bits[..node_info.prefix_length] == client_bits[..node_info.prefix_length]
+                });
+
+                // Subscribe to one or more matching nodes
+                for node in matching_nodes {
+                    self.subscribe_to_node(node.address).await;
+                }
+            }
+        }
+    }
+
+    pub async fn unsubscribe_from_node(&self) {
+        match TcpStream::connect(self.node_address).await {
+            Ok(mut stream) => {
+                let message = Message::Unsubscribe;
+                let data = bincode::serialize(&message)?;
+                stream.write_all(&data).await?;
+
+                // Optionally handle UnsubscribeAck
             }
             Err(e) => {
                 error!("Failed to connect to node: {:?}", e);

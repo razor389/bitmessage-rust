@@ -21,6 +21,7 @@ pub struct Packet {
     pub ciphertext: Vec<u8>,
     pub pow_nonce: u64,
     pub pow_hash: Vec<u8>,
+    pub pow_difficulty: usize,
     pub recipient_address: Address,
     pub timestamp: u64, // UNIX timestamp in seconds
     pub ttl: u64,       // Time to live in seconds
@@ -43,6 +44,7 @@ impl Packet {
         ciphertext: Vec<u8>,
         pow_nonce: u64,
         pow_hash: Vec<u8>,
+        pow_difficulty: usize,
         recipient_address: Address, // Added recipient_address
         timestamp: u64,
         ttl: u64,
@@ -54,6 +56,7 @@ impl Packet {
             ciphertext,
             pow_nonce,
             pow_hash,
+            pow_difficulty,
             recipient_address, // Added recipient_address
             timestamp,
             ttl,
@@ -129,6 +132,7 @@ impl Packet {
             ciphertext,
             pow_nonce: 0,
             pow_hash: Vec::new(),
+            pow_difficulty,
             recipient_address,
             timestamp,
             ttl,
