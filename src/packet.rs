@@ -1,7 +1,8 @@
+
 // src/packet.rs
 use zstd::stream::encode_all;
 use zstd::stream::decode_all;
-
+use sha2::{Sha256, Digest};
 use serde::{Serialize, Deserialize};
 use ed25519_dalek::{Signature, VerifyingKey};
 use x25519_dalek::PublicKey as X25519PublicKey;
@@ -13,6 +14,43 @@ use log::{info, debug, warn, error};
 
 pub const ADDRESS_LENGTH: usize = 20; // For example, 20 bytes (160 bits)
 pub type Address = [u8; ADDRESS_LENGTH];
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AddressPrefix {
+    pub bytes: [u8; ADDRESS_LENGTH],
+    pub prefix_length: usize, // Number of bits in the prefix (0 to ADDRESS_LENGTH * 8)
+}
+
+impl AddressPrefix {
+    pub fn new(address: &Address, prefix_length: usize) -> Self {
+        let mut bytes = *address;
+        zero_out_bits_after_prefix(&mut bytes, prefix_length);
+        AddressPrefix { bytes, prefix_length }
+    }
+}
+
+// Helper function to zero out bits after the prefix length
+pub fn zero_out_bits_after_prefix(bytes: &mut [u8; ADDRESS_LENGTH], prefix_length: usize) {
+    let total_bits = ADDRESS_LENGTH * 8;
+
+    if prefix_length >= total_bits {
+        // No need to zero out anything
+        return;
+    }
+
+    let byte_index = prefix_length / 8;
+    let bit_index = prefix_length % 8;
+
+    // Zero out bits after the bit_index in the byte at byte_index
+    if bit_index != 0 && byte_index < ADDRESS_LENGTH {
+        let mask = 0xFF << (8 - bit_index);
+        bytes[byte_index] &= mask;
+    }
+
+    // Zero out all bytes after byte_index
+    for i in (byte_index + 1)..ADDRESS_LENGTH {
+        bytes[i] = 0;
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Packet {
@@ -162,7 +200,7 @@ impl Packet {
         &self,
         encryption: &Encryption,
         pow_difficulty: usize,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<(Vec<u8>, Address)> {
         info!(
             "Verifying and decrypting packet destined for address {:?}",
             self.recipient_address
@@ -216,7 +254,18 @@ impl Packet {
         // Step 5: Decompress the message
         let decompressed_message = decode_all(&encrypted_payload.compressed_message[..]).ok()?;
 
-        Some(decompressed_message)
+        // Step 6: Infer sender's address
+        let sender_address = {
+            let mut hasher = Sha256::new();
+            hasher.update(&verifying_key.to_bytes());
+            hasher.update(&encrypted_payload.permanent_dh_public_key);
+            let result = hasher.finalize();
+            let mut address = [0u8; ADDRESS_LENGTH];
+            address.copy_from_slice(&result[..ADDRESS_LENGTH]);
+            address
+        };
+
+        Some((decompressed_message, sender_address))
     }
 
     pub fn verify_pow(&self, pow_difficulty: usize) -> bool {

@@ -1,6 +1,6 @@
 // src/node.rs
 
-use crate::packet::{Packet, Address};
+use crate::packet::{Address, AddressPrefix, Packet};
 use crate::common::{address_to_bits, Message, NodeInfo, NodeInfoExtended};
 use crate::serializable_argon2_params::SerializableArgon2Params;
 use std::collections::HashMap;
@@ -403,6 +403,11 @@ impl Node {
     /// Handle an incoming message
     async fn handle_message(&self, message: Message, sender_address: SocketAddr) {
         match message {
+            Message::FindNodePrefix(address_prefix) => {
+                let matching_nodes = self.find_nodes_with_prefix(&address_prefix).await;
+                let response = Message::NodesExtended(matching_nodes);
+                self.send_message(response, sender_address).await;
+            }
             Message::FindNode(target_id) => {
                 let closest_nodes = self.find_closest_nodes(&target_id).await;
                 let response = Message::Nodes(closest_nodes);
@@ -603,6 +608,43 @@ impl Node {
             let message = Message::Packet(packet.clone());
             self.send_message(message, node.address).await;
         }
+    }
+
+    /// Find nodes with matching prefixes
+    async fn find_nodes_with_prefix(&self, address_prefix: &AddressPrefix) -> Vec<NodeInfoExtended> {
+        let prefix_bits = address_to_bits(&address_prefix.bytes);
+        let prefix_length = address_prefix.prefix_length;
+
+        let routing_table = self.routing_table.lock().await;
+        let all_nodes = routing_table.get_all_nodes();
+        drop(routing_table); // Release lock early
+
+        let node_requirements = self.node_requirements.lock().await;
+
+        let mut matching_nodes = Vec::new();
+        for node in all_nodes {
+            let node_bits = address_to_bits(&node.id);
+            let min_length = prefix_length.min(node_bits.len()).min(prefix_bits.len());
+
+            if min_length == 0 || node_bits[..min_length] == prefix_bits[..min_length] {
+                // Get the NodeInfoExtended for this node
+                if let Some(node_info_extended) = node_requirements.get(&node.id) {
+                    matching_nodes.push(node_info_extended.clone());
+                } else {
+                    // NodeInfoExtended not available; create a default one
+                    let node_info_extended = NodeInfoExtended {
+                        id: node.id,
+                        address: node.address,
+                        prefix_length: 0, // Default value
+                        pow_difficulty: self.pow_difficulty,
+                        max_ttl: self.max_ttl,
+                        min_argon2_params: self.min_argon2_params.clone(),
+                    };
+                    matching_nodes.push(node_info_extended);
+                }
+            }
+        }
+        matching_nodes
     }
 
     /// Find nodes closest to a target ID (address)

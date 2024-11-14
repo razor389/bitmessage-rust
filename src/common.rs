@@ -2,12 +2,14 @@
 
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
-use crate::{packet::{Address, Packet, ADDRESS_LENGTH}, serializable_argon2_params::SerializableArgon2Params};
+use crate::{packet::{Address, AddressPrefix, Packet, ADDRESS_LENGTH}, serializable_argon2_params::SerializableArgon2Params};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Message {
     FindNode(Address),              // Find nodes closest to a given ID (Address)
+    FindNodePrefix(AddressPrefix),
     Nodes(Vec<NodeInfo>),           // Response containing a list of NodeInfo
+    NodesExtended(Vec<NodeInfoExtended>), // Response with extended node info
     GetPacket(Address),             // Request to get packets for a recipient address (no longer used)
     Packet(Packet),                 // A packet sent between nodes or to clients
     PacketNotFound,                 // Response indicating no packets were found (no longer used)
@@ -47,4 +49,15 @@ pub fn address_to_bits(address: &Address) -> Vec<bool> {
         }
     }
     bits
+}
+
+/// Converts a bit vector to an Address
+pub fn bits_to_address(bits: &[bool]) -> Address {
+    let mut address = [0u8; ADDRESS_LENGTH];
+    for (i, bit) in bits.iter().enumerate() {
+        if *bit {
+            address[i / 8] |= 1 << (7 - (i % 8));
+        }
+    }
+    address
 }

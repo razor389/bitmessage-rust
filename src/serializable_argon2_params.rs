@@ -43,4 +43,19 @@ impl SerializableArgon2Params {
             (None, None) => true,
         }
     }
+
+    /// Returns a new SerializableArgon2Params that is the maximum of self and other
+    pub fn max_params(&self, other: &SerializableArgon2Params) -> SerializableArgon2Params {
+        SerializableArgon2Params {
+            m_cost: self.m_cost.max(other.m_cost),
+            t_cost: self.t_cost.max(other.t_cost),
+            p_cost: self.p_cost.max(other.p_cost),
+            output_length: match (self.output_length, other.output_length) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            },
+        }
+    }
 }
